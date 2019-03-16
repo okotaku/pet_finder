@@ -21,8 +21,8 @@ with timer('image'):
 with timer('img_basic'):
     train_images['image_size'] = train_images['image_filename'].apply(getSize)
     train_images['temp_size'] = train_images['image_filename'].apply(getDimensions)
-    train_images['width'] = train_images['temp_size'].apply(lambda x: x[0])
-    train_images['height'] = train_images['temp_size'].apply(lambda x: x[1])
+    train_images['width'] = train_images['temp_size'].apply(lambda x : x[0])
+    train_images['height'] = train_images['temp_size'].apply(lambda x : x[1])
     train_images = train_images.drop(['temp_size'], axis=1)
 
     aggs = {
@@ -35,4 +35,6 @@ with timer('img_basic'):
     new_columns = [k + '_' + agg for k in aggs.keys() for agg in aggs[k]]
     gp.columns = new_columns
     gp = gp.reset_index()
-    gp.drop("PetID", axis=1).to_feather("../feature/image_stats.feather")
+    new_cols = list(gp.drop("PetID", axis=1).columns)
+    train = train.merge(gp, how="left", on="PetID")
+    train[new_cols].to_feather("../feature/image_stats.feather")

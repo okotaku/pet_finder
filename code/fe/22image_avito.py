@@ -56,6 +56,13 @@ with timer('image'):
     train_images = pd.DataFrame(image_files, columns=['image_filename'])
     train_images['PetID'] = train_images['image_filename'].apply(lambda x: x.split('/')[-1].split('-')[0])
 
+with timer('image'):
+    train_image_files = sorted(glob.glob('../../input/petfinder-adoption-prediction/train_images/*.jpg'))
+    test_image_files = sorted(glob.glob('../../input/petfinder-adoption-prediction/test_images/*.jpg'))
+    image_files = train_image_files + test_image_files
+    train_images = pd.DataFrame(image_files, columns=['image_filename'])
+    train_images['PetID'] = train_images['image_filename'].apply(lambda x: x.split('/')[-1].split('-')[0])
+
 with timer('img_basic'):
     features = []
     for i, (file_path, pet_id) in enumerate(train_images.values):
@@ -78,4 +85,6 @@ with timer('img_basic'):
            ["dullness_" + color for color in color_list] + ["blurrness", "PetID"]
     X = pd.DataFrame(features, columns=cols)
     gp = X.groupby("PetID").mean().reset_index()
-    gp.to_feather("../feature/image_basic.feather")
+    new_cols = list(gp.drop("PetID", axis=1).columns)
+    train = train.merge(gp, how="left", on="PetID")
+    train[new_cols].to_feather("../feature/image_basic.feather")
