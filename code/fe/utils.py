@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+'''
+feature: v1, 2, 3, 4, 10, 11
+feature: v1, 2, 3, 4, 11, 13, 14, 17, 18, 19, 22, 23
+model: v10
+'''
 import itertools
 import json
 import gc
@@ -8,6 +14,7 @@ import cv2
 import re
 import nltk
 import lightgbm as lgb
+import xgboost as xgb
 import matplotlib
 
 matplotlib.use('Agg')
@@ -17,6 +24,7 @@ import pandas as pd
 import seaborn as sns
 import scipy as sp
 from scipy.stats import rankdata
+from PIL import Image
 from pymagnitude import Magnitude
 from gensim.models import word2vec, KeyedVectors
 from gensim.scripts.glove2word2vec import glove2word2vec
@@ -25,14 +33,17 @@ from contextlib import contextmanager
 from functools import partial
 from itertools import combinations
 from logging import getLogger, Formatter, StreamHandler, FileHandler, INFO
-from keras.applications.densenet import preprocess_input, DenseNet121
+from keras.applications.densenet import preprocess_input as preprocess_input_dense
+from keras.applications.densenet import DenseNet121
+from keras.applications.inception_resnet_v2 import preprocess_input as preprocess_input_incep
+from keras.applications.inception_resnet_v2 import InceptionResNetV2
 from keras import backend as K
 from keras.layers import GlobalAveragePooling2D, Input, Lambda, AveragePooling1D
 from keras.models import Model
 from keras.preprocessing.text import text_to_word_sequence
 from sklearn.decomposition import LatentDirichletAllocation, TruncatedSVD, NMF
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
-from sklearn.metrics import cohen_kappa_score
+from sklearn.metrics import cohen_kappa_score, mean_squared_error
 from sklearn.model_selection import GroupKFold, StratifiedKFold
 from sklearn.pipeline import make_pipeline, make_union
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -51,15 +62,23 @@ target = 'AdoptionSpeed'
 len_train = 14993
 len_test = 3948
 
+T_flag = False
+K_flag = False
+G_flag = True
+debug = True
+
 # ===============
 # Params
 # ===============
 seed = 777
+kaeru_seed = 1337
 n_splits = 5
 np.random.seed(seed)
 
 # feature engineering
 n_components = 5
+n_components_gege_img = 32
+n_components_gege_txt = 16
 img_size = 256
 batch_size = 256
 
@@ -88,10 +107,36 @@ MODEL_PARAMS = {
     'nthread': -1,
     'seed': 777,
 }
+KAERU_PARAMS = {'application': 'regression',
+                'boosting': 'gbdt',
+                'metric': 'rmse',
+                'num_leaves': 70,
+                'max_depth': 9,
+                'learning_rate': 0.01,
+                'max_bin': 32,
+                'bagging_freq': 2,
+                'bagging_fraction': 0.85,
+                'feature_fraction': 0.8,
+                'min_split_gain': 0.02,
+                'min_child_samples': 150,
+                'min_child_weight': 0.02,
+                'lambda_l2': 0.0475,
+                'verbosity': -1,
+                'seed': kaeru_seed}
+MODEL_PARAMS_XGB = {
+    'eval_metric': 'rmse',
+    'seed': 1337,
+    'eta': 0.01,
+    'subsample': 0.8,
+    'colsample_bytree': 0.85,
+    'tree_method': 'gpu_hist',
+    'device': 'gpu',
+    'silent': 1,
+}
 FIT_PARAMS = {
     'num_boost_round': 5000,
     'early_stopping_rounds': 100,
-    'verbose_eval': 100,
+    'verbose_eval': 5000,
 }
 
 # define
@@ -175,9 +220,31 @@ contraction_mapping = {u"ain’t": u"is not", u"aren’t": u"are not", u"can’t
                        u"beauuuuuuuuutiful": u"beautiful", u"adopt🙏": u"adopt", u"addopt": u"adopt",
                        u"enxiety": u"anxiety", u"vaksin": u"vaccine"}
 numerical_features = []
-text_features = ['Name', 'Description']
+text_features = ['Name', 'Description', 'Description_Emb', 'Description_bow']
+meta_text = ['BreedName_main_breed', 'BreedName_second_breed', 'annots_top_desc', 'sentiment_text',
+             'annots_top_desc_pick', 'sentiment_entities']
 remove = ['index', 'seq_text', 'PetID', 'Name', 'Description', 'RescuerID', 'StateName', 'annots_top_desc',
-          'sentiment_text', 'Description_Emb']
+          'sentiment_text',
+          'sentiment_entities', 'Description_Emb', 'Description_bow', 'annots_top_desc_pick']
+kaeru_drop_cols = ["2017GDPperCapita", "Bumiputra", "Chinese", "HDI", "Indian", "Latitude", "Longitude",
+                   'color_red_score_mean_mean', 'color_red_score_mean_sum', 'color_blue_score_mean_mean',
+                   'color_blue_score_mean_sum', 'color_green_score_mean_mean', 'color_green_score_mean_sum',
+                   'dog_cat_scores_mean_mean', 'dog_cat_scores_mean_sum', 'dog_cat_topics_mean_mean',
+                   'dog_cat_topics_mean_sum', 'is_dog_or_cat_mean_mean', 'is_dog_or_cat_mean_sum',
+                   'len_text_mean_mean', 'len_text_mean_sum', 'StateID']
+gege_drop_cols = ['2017GDPperCapita', 'Affectionate with Family_second_breed', 'Amount of Shedding_second_breed',
+                  'Breed1_equals_Breed2', 'Bumiputra', 'Chinese',
+                  'Easy to Groom_second_breed', 'Friendly Toward Strangers_second_breed', 'General Health_second_breed',
+                  'HDI', 'Indian', 'Intelligence_second_breed', 'Kid Friendly_second_breed', 'Latitude', 'Longitude',
+                  'Pet Friendly_second_breed', 'Pop_density', 'Potential for Playfulness_second_breed',
+                  'Tendency to Vocalize_second_breed', 'Urban_pop',
+                  'fix_Breed1', 'fix_Breed2', 'single_Breed', 'color_red_score_mean_mean', 'color_red_score_mean_sum',
+                  'color_red_score_mean_var', 'color_blue_score_mean_mean', 'color_blue_score_mean_sum',
+                  'color_blue_score_mean_var', 'color_green_score_mean_mean', 'color_green_score_mean_sum',
+                  'color_green_score_mean_var', 'dog_cat_scores_mean_mean', 'dog_cat_scores_mean_sum',
+                  'dog_cat_scores_mean_var', 'dog_cat_topics_mean_mean', 'dog_cat_topics_mean_sum',
+                  'dog_cat_topics_mean_var', 'is_dog_or_cat_mean_mean', 'is_dog_or_cat_mean_sum',
+                  'is_dog_or_cat_mean_var', 'len_text_mean_mean', 'len_text_mean_sum', 'len_text_mean_var']
 
 ps = nltk.stem.PorterStemmer()
 lc = nltk.stem.lancaster.LancasterStemmer()
@@ -275,6 +342,28 @@ def analyzer_embed(text):
         words.append(word)
 
     return " ".join(words)
+
+
+def analyzer_k(text):
+    stop_words = ['i', 'a', 'an', 'the', 'to', 'and', 'or', 'if', 'is', 'are', 'am', 'it', 'this', 'that', 'of', 'from',
+                  'in', 'on']
+    text = text.lower()  # 小文字化
+    text = text.replace('\n', '')  # 改行削除
+    text = text.replace('\t', '')  # タブ削除
+    text = re.sub(re.compile(r'[!-\/:-@[-`{-~]'), ' ', text)  # 記号をスペースに置き換え
+    text = text.split(' ')  # スペースで区切る
+
+    words = []
+    for word in text:
+        if (re.compile(r'^.*[0-9]+.*$').fullmatch(word) is not None):  # 数字が含まれるものは除外
+            continue
+        if word in stop_words:  # ストップワードに含まれるものは除外
+            continue
+        if len(word) < 2:  # 1文字、0文字（空文字）は除外
+            continue
+        words.append(word)
+
+    return words
 
 
 # ===============
@@ -568,6 +657,73 @@ def merge_state_info(train):
 
 def merge_breed_name(train):
     breeds = pd.read_csv('../../input/petfinder-adoption-prediction/breed_labels.csv')
+    with open("../../input/cat-and-dog-breeds-parameters/rating.json", 'r', encoding='utf-8') as f:
+        breed_data = json.load(f)
+    cat_breed = pd.DataFrame.from_dict(breed_data['cat_breeds']).T
+    dog_breed = pd.DataFrame.from_dict(breed_data['dog_breeds']).T
+    df = pd.concat([dog_breed, cat_breed], axis=0).reset_index().rename(columns={'index': 'BreedName'})
+    df.BreedName.replace(
+        {
+            'Siamese Cat': 'Siamese',
+            'Chinese Crested': 'Chinese Crested Dog',
+            'Australian Cattle Dog': 'Australian Cattle Dog/Blue Heeler',
+            'Yorkshire Terrier': 'Yorkshire Terrier Yorkie',
+            'Pembroke Welsh Corgi': 'Welsh Corgi',
+            'Sphynx': 'Sphynx (hairless cat)',
+            'Plott': 'Plott Hound',
+            'Korean Jindo Dog': 'Jindo',
+            'Anatolian Shepherd Dog': 'Anatolian Shepherd',
+            'Belgian Malinois': 'Belgian Shepherd Malinois',
+            'Belgian Sheepdog': 'Belgian Shepherd Dog Sheepdog',
+            'Belgian Tervuren': 'Belgian Shepherd Tervuren',
+            'Bengal Cats': 'Bengal',
+            'Bouvier des Flandres': 'Bouvier des Flanders',
+            'Brittany': 'Brittany Spaniel',
+            'Caucasian Shepherd Dog': 'Caucasian Sheepdog (Caucasian Ovtcharka)',
+            'Dandie Dinmont Terrier': 'Dandi Dinmont Terrier',
+            'Bulldog': 'English Bulldog',
+            'American English Coonhound': 'English Coonhound',
+            'Small Munsterlander Pointer': 'Munsterlander',
+            'Entlebucher Mountain Dog': 'Entlebucher',
+            'Exotic': 'Exotic Shorthair',
+            'Flat-Coated Retriever': 'Flat-coated Retriever',
+            'English Foxhound': 'Foxhound',
+            'Alaskan Klee Kai': 'Klee Kai',
+            'Newfoundland': 'Newfoundland Dog',
+            'Norwegian Forest': 'Norwegian Forest Cat',
+            'Nova Scotia Duck Tolling Retriever': 'Nova Scotia Duck-Tolling Retriever',
+            'American Pit Bull Terrier': 'Pit Bull Terrier',
+            'Ragdoll Cats': 'Ragdoll',
+            'Standard Schnauzer': 'Schnauzer',
+            'Scottish Terrier': 'Scottish Terrier Scottie',
+            'Chinese Shar-Pei': 'Shar Pei',
+            'Shetland Sheepdog': 'Shetland Sheepdog Sheltie',
+            'West Highland White Terrier': 'West Highland White Terrier Westie',
+            'Soft Coated Wheaten Terrier': 'Wheaten Terrier',
+            'Wirehaired Pointing Griffon': 'Wire-haired Pointing Griffon',
+            'Xoloitzcuintli': 'Wirehaired Terrier',
+            'Cane Corso': 'Cane Corso Mastiff',
+            'Havana Brown': 'Havana',
+        }, inplace=True
+    )
+    breeds = breeds.merge(df, how='left', on='BreedName')
+
+    breeds1_dic, breeds2_dic = {}, {}
+    for c in breeds.columns:
+        if c == "BreedID":
+            continue
+        breeds1_dic[c] = c + "_main_breed_all"
+        breeds2_dic[c] = c + "_second_breed_all"
+    train = train.merge(breeds.rename(columns=breeds1_dic), how='left', left_on='Breed1', right_on='BreedID')
+    train.drop(['BreedID'], axis=1, inplace=True)
+    train = train.merge(breeds.rename(columns=breeds2_dic), how='left', left_on='Breed2', right_on='BreedID')
+    train.drop(['BreedID'], axis=1, inplace=True)
+
+    return train
+
+
+def merge_breed_name_sub(train):
+    breeds = pd.read_csv('../../input/petfinder-adoption-prediction/breed_labels.csv')
     df = pd.read_json('../../input/cat-and-dog-breeds-parameters/rating.json')
     cat_df = df.cat_breeds.dropna(0).reset_index().rename(columns={'index': 'BreedName'})
     dog_df = df.dog_breeds.dropna(0).reset_index().rename(columns={'index': 'BreedName'})
@@ -668,18 +824,11 @@ def get_interactions(train):
 
 
 def get_text_features(train):
-    train['num_chars'] = train['Description'].apply(len)
-    train['num_capitals'] = train['Description'].apply(lambda x: sum(1 for c in x if c.isupper()))
-    train['caps_vs_length'] = train.apply(lambda row: row['num_capitals'] / (row['num_chars'] + 1e-5), axis=1)
-    train['num_exclamation_marks'] = train['Description'].apply(lambda x: x.count('!'))
-    train['num_question_marks'] = train['Description'].apply(lambda x: x.count('?'))
-    train['num_punctuation'] = train['Description'].apply(lambda x: sum(x.count(w) for w in '.,;:'))
-    train['num_symbols'] = train['Description'].apply(lambda x: sum(x.count(w) for w in '*&$%'))
-    train['num_words'] = train['Description'].apply(lambda x: len(x.split()))
-    train['num_unique_words'] = train['Description'].apply(lambda x: len(set(w for w in x.split())))
-    train['words_vs_unique'] = train['num_unique_words'] / train['num_words']
-    train['num_smilies'] = train['Description'].apply(lambda x: sum(x.count(w) for w in (':-)', ':)', ';-)', ';)')))
-    train['name_in_description'] = train.apply(lambda x: x['Name'] in x['Description'], axis=1).astype(int)
+    train['Length_Description'] = train['Description'].map(len)
+    train['Length_annots_top_desc'] = train['annots_top_desc'].map(len)
+    train['Lengths_sentiment_text'] = train['sentiment_text'].map(len)
+    train['Lengths_sentiment_entities'] = train['sentiment_entities'].map(len)
+
     return train
 
 
@@ -739,12 +888,23 @@ class MetaDataParser(object):
         file_sentences_text = ' '.join(file_sentences_text)
         file_sentences_sentiment = [x['sentiment'] for x in file['sentences']]
 
-        file_sentences_sentiment = pd.DataFrame.from_dict(
+        file_sentences_sentiment_sum = pd.DataFrame.from_dict(
             file_sentences_sentiment, orient='columns').sum()
-        file_sentences_sentiment = file_sentences_sentiment.add_prefix('document_').to_dict()
+        file_sentences_sentiment_sum = file_sentences_sentiment_sum.add_prefix('document_sum_').to_dict()
 
-        file_sentiment.update(file_sentences_sentiment)
+        file_sentences_sentiment_mean = pd.DataFrame.from_dict(
+            file_sentences_sentiment, orient='columns').mean()
+        file_sentences_sentiment_mean = file_sentences_sentiment_mean.add_prefix('document_mean_').to_dict()
+
+        file_sentences_sentiment_var = pd.DataFrame.from_dict(
+            file_sentences_sentiment, orient='columns').sum()
+        file_sentences_sentiment_var = file_sentences_sentiment_var.add_prefix('document_var_').to_dict()
+
+        file_sentiment.update(file_sentences_sentiment_mean)
+        file_sentiment.update(file_sentences_sentiment_sum)
+        file_sentiment.update(file_sentences_sentiment_var)
         file_sentiment.update({"sentiment_text": file_sentences_text})
+        file_sentiment.update({"sentiment_entities": file_entities})
 
         return pd.Series(file_sentiment)
 
@@ -754,7 +914,11 @@ class MetaDataParser(object):
         if 'labelAnnotations' in file_keys:
             label_annotations = file['labelAnnotations']
             file_top_score = [x['score'] for x in label_annotations]
+            pick_value = int(len(label_annotations) * 0.3)
+            if pick_value == 0: pick_value = 1
+            file_top_score_pick = [x['score'] for x in label_annotations[:pick_value]]
             file_top_desc = [x['description'] for x in label_annotations]
+            file_top_desc_pick = [x['description'] for x in label_annotations[:pick_value]]
             dog_cat_scores = []
             dog_cat_topics = []
             is_dog_or_cat = []
@@ -771,6 +935,8 @@ class MetaDataParser(object):
             dog_cat_scores = []
             dog_cat_topics = []
             is_dog_or_cat = []
+            file_top_score_pick = []
+            file_top_desc_pick = []
 
         if 'faceAnnotations' in file_keys:
             file_face = file['faceAnnotations']
@@ -805,6 +971,8 @@ class MetaDataParser(object):
 
         metadata = {
             'annots_top_desc': ' '.join(file_top_desc),
+            'annots_top_desc_pick': ' '.join(file_top_desc_pick),
+            'annots_score_pick_mean': np.mean(file_top_score_pick),
             'n_faces': n_faces,
             'n_text_annotations': file_n_text_annotations,
             'crop_conf': file_crop_conf,
@@ -812,7 +980,7 @@ class MetaDataParser(object):
             'crop_y': file_crop_y,
             'crop_importance': file_crop_importance,
         }
-        metadata.update(self.get_stats(file_top_score, 'annots_score'))
+        metadata.update(self.get_stats(file_top_score, 'annots_score_normal'))
         metadata.update(self.get_stats(file_color_score, 'color_score'))
         metadata.update(self.get_stats(file_color_pixelfrac, 'color_pixel_score'))
         metadata.update(self.get_stats(file_color_red, 'color_red_score'))
@@ -822,6 +990,12 @@ class MetaDataParser(object):
         metadata.update(self.get_stats(dog_cat_topics, 'dog_cat_topics'))
         metadata.update(self.get_stats(is_dog_or_cat, 'is_dog_or_cat'))
         metadata.update(self.get_stats(file_len_text, 'len_text'))
+        metadata.update({"color_red_score_first": file_color_red[0] if len(file_color_red) > 0 else -1})
+        metadata.update({"color_blue_score_first": file_color_blue[0] if len(file_color_blue) > 0 else -1})
+        metadata.update({"color_green_score_first": file_color_green[0] if len(file_color_green) > 0 else -1})
+        metadata.update({"color_pixel_score_first": file_color_pixelfrac[0] if len(file_color_pixelfrac) > 0 else -1})
+        metadata.update({"color_score_first": file_color_score[0] if len(file_color_score) > 0 else -1})
+        metadata.update({"label_score_first": file_top_score[0] if len(file_top_score) > 0 else -1})
 
         return pd.Series(metadata)
 
@@ -874,15 +1048,12 @@ def pretrained_w2v(train_text, model, name):
     w2v_cols = ["{}{}".format(name, i) for i in range(1, model.vector_size + 1)]
     result = pd.DataFrame(result)
     result.columns = w2v_cols
-    del model;
-    gc.collect()
 
     return result
 
 
-def w2v_pymagnitude(train_text, path, name):
+def w2v_pymagnitude(train_text, model, name):
     train_corpus = [text_to_word_sequence(text) for text in train_text]
-    model = Magnitude(path)
 
     result = []
     for text in train_corpus:
@@ -919,10 +1090,27 @@ def w2v_pymagnitude(train_text, path, name):
     w2v_cols = ["{}_mag{}".format(name, i) for i in range(1, model.dim + 1)]
     result = pd.DataFrame(result)
     result.columns = w2v_cols
-    del model;
-    gc.collect()
 
     return result
+
+
+def doc2vec(description_k, d2v_param):
+    corpus = [TaggedDocument(words=analyzer_k(text), tags=[i]) for i, text in enumerate(description_k)]
+    doc2vecs = Doc2Vec(
+        documents=corpus, dm=1,
+        **d2v_param
+    )  # dm == 1 -> dmpv, dm != 1 -> DBoW
+    doc2vecs = np.array([doc2vecs.infer_vector(analyzer_k(text)) for text in description_k])
+
+    doc2vec_df = pd.DataFrame()
+    doc2vec_df['d2v_mean'] = np.mean(doc2vecs, axis=1)
+    doc2vec_df['d2v_sum'] = np.sum(doc2vecs, axis=1)
+    doc2vec_df['d2v_max'] = np.max(doc2vecs, axis=1)
+    doc2vec_df['d2v_min'] = np.min(doc2vecs, axis=1)
+    doc2vec_df['d2v_median'] = np.median(doc2vecs, axis=1)
+    doc2vec_df['d2v_var'] = np.var(doc2vecs, axis=1)
+
+    return doc2vec_df
 
 
 def resize_to_square(im):
@@ -940,11 +1128,39 @@ def resize_to_square(im):
     return new_im
 
 
-def load_image(path):
+def load_image(path, preprocesssing):
     image = cv2.imread(path)
     new_image = resize_to_square(image)
-    new_image = preprocess_input(new_image)
+    new_image = preprocesssing(new_image)
     return new_image
+
+
+def get_age_feats(df):
+    df["Age_year"] = df["Age"] / 12
+    over_1year_flag = df["Age"] / 12 >= 1
+    df.loc[over_1year_flag, "over_1year"] = 1
+    df.loc[~over_1year_flag, "over_1year"] = 0
+    return df
+
+
+def freq_encoding(df, freq_cols):
+    for c in freq_cols:
+        grouped = df.groupby(c).size().reset_index(name=c + 'category_frequency')
+        # 元のデータセットにカテゴリーをキーとして結合
+        df = df.merge(grouped, how="left", on=c)
+        # df["frequency"] = df["category_counts"]/df["category_counts"].count()
+        df[c + 'category_frequency'] = df[c + 'category_frequency'] / df[c + 'category_frequency'].count()
+    return df
+
+
+def getSize(filename):
+    st = os.stat(filename)
+    return st.st_size
+
+
+def getDimensions(filename):
+    img_size = Image.open(filename).size
+    return img_size
 
 
 # ===============
@@ -959,8 +1175,8 @@ def get_y():
 
 
 def run_model(X_train, y_train, X_valid, y_valid, X_test,
-              categorical_features, numerical_features,
-              predictors, maxvalue_dict, fold_id):
+              categorical_features,
+              predictors, maxvalue_dict, fold_id, params, model_name):
     train = lgb.Dataset(X_train, y_train,
                         categorical_feature=categorical_features,
                         feature_name=predictors)
@@ -969,7 +1185,7 @@ def run_model(X_train, y_train, X_valid, y_valid, X_test,
                         feature_name=predictors)
     evals_result = {}
     model = lgb.train(
-        MODEL_PARAMS,
+        params,
         train,
         valid_sets=[valid],
         valid_names=['valid'],
@@ -978,28 +1194,58 @@ def run_model(X_train, y_train, X_valid, y_valid, X_test,
     )
     logger.info(f'Best Iteration: {model.best_iteration}')
 
+    # train score
+    y_pred_train = model.predict(X_train)
+    train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+
     # validation score
     y_pred_valid = model.predict(X_valid)
-
-    # feature importances
-    importances = pd.DataFrame()
-    importances['feature'] = predictors
-    importances['gain'] = model.feature_importance(importance_type='gain')
-    importances['split'] = model.feature_importance(importance_type='split')
-    importances['fold'] = fold_id
-    importances.to_pickle(f'feature_importances_{MODEL_NAME}_fold{fold_id}.pkl')
+    valid_rmse = np.sqrt(mean_squared_error(y_valid, y_pred_valid))
+    y_pred_valid = rankdata(y_pred_valid) / len(y_pred_valid)
 
     # save model
-    model.save_model(f'{MODEL_NAME}_fold{fold_id}.txt')
+    model.save_model(f'{model_name}_fold{fold_id}.txt')
 
     # predict test
     y_pred_test = model.predict(X_test)
+    y_pred_test = rankdata(y_pred_test) / len(y_pred_test)
 
     # save predictions
-    np.save(f'{MODEL_NAME}_train_fold{fold_id}.npy', y_pred_valid)
-    np.save(f'{MODEL_NAME}_test_fold{fold_id}.npy', y_pred_test)
+    np.save(f'{model_name}_train_fold{fold_id}.npy', y_pred_valid)
+    np.save(f'{model_name}_test_fold{fold_id}.npy', y_pred_test)
 
-    return y_pred_test
+    return y_pred_valid, y_pred_test, train_rmse, valid_rmse
+
+
+def run_xgb_model(X_train, y_train, X_valid, y_valid, X_test,
+                  predictors, maxvalue_dict, fold_id, params, model_name):
+    d_train = xgb.DMatrix(data=X_train, label=y_train, feature_names=predictors)
+    d_valid = xgb.DMatrix(data=X_valid, label=y_valid, feature_names=predictors)
+
+    watchlist = [(d_train, 'train'), (d_valid, 'valid')]
+    model = xgb.train(dtrain=d_train, evals=watchlist, params=params, **FIT_PARAMS)
+
+    # train score
+    y_pred_train = model.predict(d_train, ntree_limit=model.best_ntree_limit)
+    train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+
+    # validation score
+    y_pred_valid = model.predict(d_valid, ntree_limit=model.best_ntree_limit)
+    valid_rmse = np.sqrt(mean_squared_error(y_valid, y_pred_valid))
+    y_pred_valid = rankdata(y_pred_valid) / len(y_pred_valid)
+
+    # save model
+    model.save_model(f'{model_name}_fold{fold_id}.txt')
+
+    # predict test
+    y_pred_test = model.predict(xgb.DMatrix(data=X_test, feature_names=predictors), ntree_limit=model.best_ntree_limit)
+    y_pred_test = rankdata(y_pred_test) / len(y_pred_test)
+
+    # save predictions
+    np.save(f'{model_name}_train_fold{fold_id}.npy', y_pred_valid)
+    np.save(f'{model_name}_test_fold{fold_id}.npy', y_pred_test)
+
+    return y_pred_valid, y_pred_test, train_rmse, valid_rmse
 
 
 def plot_mean_feature_importances(feature_importances, max_num=50, importance_type='gain', path=None):
@@ -1034,10 +1280,10 @@ class OptimizedRounder(object):
         return ll
 
     def fit(self, X, y):
-        coef = [1.5, 2.0, 2.5, 3.0]
+        coef = [0.2, 0.4, 0.6, 0.8]
         golden1 = 0.618
         golden2 = 1 - golden1
-        ab_start = [(1, 2), (1.5, 2.5), (2, 3), (2.5, 3.5)]
+        ab_start = [(0.01, 0.3), (0.15, 0.56), (0.35, 0.75), (0.6, 0.9)]
         for it1 in range(10):
             for idx in range(4):
                 # golden section search
@@ -1066,7 +1312,6 @@ class OptimizedRounder(object):
     def coefficients(self):
         return self.coef_['x']
 
-
 plt.rcParams['figure.figsize'] = (12, 9)
 
 pd.options.display.max_rows = 128
@@ -1077,7 +1322,7 @@ test = pd.read_csv('../../input/petfinder-adoption-prediction/test/test.csv')
 train = pd.concat([train, test], sort=True)
 train[['Description', 'Name']] = train[['Description', 'Name']].astype(str)
 train["Description_Emb"] = [analyzer_embed(text) for text in train["Description"]]
-train["Description"] = [analyzer_bow(text) for text in train["Description"]]
+train["Description_bow"] = [analyzer_bow(text) for text in train["Description"]]
 train['fix_Breed1'] = train['Breed1']
 train['fix_Breed2'] = train['Breed2']
 train.loc[train['Breed1'] == 0, 'fix_Breed1'] = train[train['Breed1'] == 0]['Breed2']
@@ -1086,3 +1331,4 @@ train['Breed1_equals_Breed2'] = (train['Breed1'] == train['Breed2']).astype(int)
 train['single_Breed'] = (train['Breed1'] * train['Breed2'] == 0).astype(int)
 train.drop(["Breed1", "Breed2"], axis=1)
 train.rename(columns={"fix_Breed1": "Breed1", "fix_Breed2": "Breed2"})
+train = train.reset_index(drop=True)

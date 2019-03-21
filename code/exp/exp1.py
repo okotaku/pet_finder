@@ -67,7 +67,7 @@ len_test = 3948
 T_flag = True
 K_flag = True
 G_flag = True
-debug = False
+debug = True
 
 # ===============
 # Params
@@ -255,8 +255,8 @@ gege_drop_cols = ['2017GDPperCapita', 'Breed1_equals_Breed2', 'Bumiputra', 'Chin
                   'dog_cat_scores_mean_var', 'dog_cat_topics_mean_mean', 'dog_cat_topics_mean_sum',
                   'dog_cat_topics_mean_var', 'is_dog_or_cat_mean_mean', 'is_dog_or_cat_mean_sum',
                   'is_dog_or_cat_mean_var', 'len_text_mean_mean', 'len_text_mean_sum', 'len_text_mean_var']
-use_cols = pd.read_csv("../input/pet-usecols/importance7.csv")
-# use_cols = pd.read_csv("importance7.csv")
+# use_cols = pd.read_csv("../input/pet-usecols/importance9.csv")
+use_cols = pd.read_csv("importance9.csv")
 use_cols["gain"] = use_cols["gain"] / use_cols["gain"].sum()
 use_cols = list(use_cols[use_cols.gain > 0.0002].feature.values)
 
@@ -867,11 +867,40 @@ def merge_breed_name_sub(train):
 
 
 def merge_breed_ranking(train):
-    breeds = pd.read_csv('../../input/breed-labels-with-ranks/breed_labels_with_ranks.csv')
+    breeds = pd.read_csv('../input/breed-labels-with-ranks/breed_labels_with_ranks.csv').drop("BreedName", axis=1)
     train = train.merge(breeds, how="left", left_on="fix_Breed1", right_on="BreedID")
     train = train.rename(columns={"BreedCatRank": "BreedCatRank_main", "BreedDogRank": "BreedDogRank_main"})
     train = train.merge(breeds, how="left", left_on="fix_Breed2", right_on="BreedID")
     train = train.rename(columns={"BreedCatRank": "BreedCatRank_second", "BreedDogRank": "BreedDogRank_second"})
+
+    return train
+
+
+def breed_mismatch(train):
+    breed_labels = pd.read_csv('../input/petfinder-adoption-prediction/breed_labels.csv')
+    dog_breed_labels_set = list(breed_labels[breed_labels['Type'] == 1]['BreedID'])
+    dog_breed_labels_set.remove(307)
+    train['breeds_mismatch'] = list((train['Type'] == 2) & (
+                (train['fix_Breed1'].isin(dog_breed_labels_set)) | (train['fix_Breed2'].isin(dog_breed_labels_set))))
+    train['breeds_mismatch'] = train['breeds_mismatch'].astype(int)
+
+    return train
+
+
+def breed_mismatch_desc(train):
+    train['desc_contain_dog'] = train['Description'].str.lower().str.contains(' dog | dogs ')
+    train['desc_contain_cat'] = train['Description'].str.lower().str.contains(' cat | cats ')
+    train['desc_miss_match'] = list((train['Type'] == 1) & (train['desc_contain_cat']))
+    train['desc_miss_match'] = train['desc_miss_match'].astype(int)
+
+    return train
+
+
+def breed_mismatch_meta(train):
+    train['annot_contain_dog'] = train['annots_top_desc'].str.lower().str.contains(' dog | dogs ')
+    train['annot_contain_cat'] = train['annots_top_desc'].str.lower().str.contains(' cat | cats ')
+    train['annot_miss_match'] = list((train['Type'] == 1) & (train['annot_contain_cat']))
+    train['annot_miss_match'] = train['annot_miss_match'].astype(int)
 
     return train
 
@@ -1173,7 +1202,7 @@ def w2v_pymagnitude(train_text, model, name):
         vec = vec / (n_w + 1)
         result.append(vec)
 
-    w2v_cols = ["{}_mag{}".format(name, i) for i in range(1, model.dim + 1)]
+    w2v_cols = ["{}{}".format(name, i) for i in range(1, model.dim + 1)]
     result = pd.DataFrame(result)
     result.columns = w2v_cols
 
@@ -1543,6 +1572,12 @@ if __name__ == '__main__':
             train_images = pd.DataFrame(image_files, columns=['image_filename'])
             train_images['PetID'] = train_images['image_filename'].apply(lambda x: x.split('/')[-1].split('-')[0])
 
+        with timer('breed mismatch features'):
+            train = breed_mismatch(train)
+            train = breed_mismatch_desc(train)
+            t_cols += ['breeds_mismatch', 'contain_dog', 'desc_contain_cat', 'desc_miss_match']
+            k_cols += ['breeds_mismatch', 'desc_miss_match']
+
         with timer('preprocess densenet'):
             if debug:
                 import feather
@@ -1604,7 +1639,7 @@ if __name__ == '__main__':
             with timer('merge emoji files'):
                 train = merge_emoji(train)
 
-            with timer('merge breed ranking files'):
+            with timer('preprocess breed files'):
                 train = merge_breed_ranking(train)
 
             with timer('preprocess and simple features'):
@@ -1786,7 +1821,7 @@ if __name__ == '__main__':
                                             + ['meta_desc_count_nmf_{}'.format(i) for i in range(n_components)]
                                             + ['meta_desc_count_bm25_{}'.format(i) for i in range(n_components)])
                 train = pd.concat([train, X], axis=1)
-                train.drop(['desc_bow'], axis=1, inplace=True)
+                train.drop(['desc_bow', 'desc'], axis=1, inplace=True)
 
             with timer('description fasttext'):
                 embedding = '../input/quora-embedding/GoogleNews-vectors-negative300.bin'
@@ -1799,24 +1834,10 @@ if __name__ == '__main__':
             with timer('description glove'):
                 embedding = "../input/pymagnitude-data/glove.840B.300d.magnitude"
                 model = Magnitude(embedding)
-                X = w2v_pymagnitude(train["Description_Emb"], model, name="glove")
+                X = w2v_pymagnitude(train["Description_Emb"], model, name="glove_mag")
                 train = pd.concat([train, X], axis=1)
                 del model;
                 gc.collect()
-
-            with timer('description glove wiki'):
-                embedding = "../input/pymagnitude-data/glove.6B.300d_wiki_light.magnitude"
-                model = Magnitude(embedding)
-                X = w2v_pymagnitude(train["Description_Emb"], model, name="glove_wiki_mag_light")
-                train = pd.concat([train, X], axis=1)
-
-            with timer('meta text glove wiki'):
-                train["desc_emb"] = [analyzer_emb(text) for text in train["desc"]]
-                X = w2v_pymagnitude(train["desc"], model, name="glove_wiki_mag_light_meta")
-                train = pd.concat([train, X], axis=1)
-                del model;
-                gc.collect()
-                train.drop(['desc_emb', 'desc'], axis=1, inplace=True)
 
             with timer('image features'):
                 train['num_images'] = train['PetID'].apply(lambda x: sum(train_images.PetID == x))
@@ -2355,9 +2376,101 @@ if __name__ == '__main__':
         np.save("y_oof_g.npy", y_pred_g)
         np.save("extract_idx.npy", extract_idx)
 
+    if T_flag and G_flag:
+        with timer('takuoko feature info'):
+            categorical_features_t = list(set(categorical_features) - set(remove))
+            predictors = list(set(common_cols + t_cols + categorical_features_t) - set([target] + remove))
+            predictors = [c for c in predictors if c in use_cols]
+            categorical_features_t = [c for c in categorical_features_t if c in predictors]
+            logger.info(f'predictors / use_cols = {len(predictors)} / {len(use_cols)}')
+
+            train = train.loc[:, ~train.columns.duplicated()]
+
+            X = train.loc[:, predictors]
+            y = train.loc[:, target]
+            rescuer_id = train.loc[:, 'RescuerID'].iloc[:len_train]
+            X_test = X[len_train:]
+            X = X[:len_train]
+            y = y[:len_train]
+            X = X.iloc[extract_idx].reset_index(drop=True)
+            y = y[extract_idx].reset_index(drop=True)
+            rescuer_id = rescuer_id[extract_idx].reset_index(drop=True)
+
+        with timer('takuoko modeling'):
+            y_pred_t2 = np.empty(len(extract_idx), )
+            y_test_t2 = []
+            train_losses, valid_losses = [], []
+
+            cv = StratifiedGroupKFold(n_splits=n_splits)
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
+                X_train = X.loc[train_index, :]
+                X_valid = X.loc[valid_index, :]
+                y_train = y[train_index]
+                y_valid = y[valid_index]
+
+                pred_val, pred_test, train_rmse, valid_rmse = run_model(X_train, y_train, X_valid, y_valid, X_test,
+                                                                        categorical_features_t, predictors,
+                                                                        maxvalue_dict, fold_id, MODEL_PARAMS,
+                                                                        MODEL_NAME + "_t")
+                y_pred_t2[valid_index] = pred_val
+                y_test_t2.append(pred_test)
+                train_losses.append(train_rmse)
+                valid_losses.append(valid_rmse)
+
+            y_test_t2 = np.mean(y_test_t2, axis=0)
+            logger.info(f'train RMSE = {np.mean(train_losses)}')
+            logger.info(f'valid RMSE = {np.mean(valid_losses)}')
+
+        np.save("y_test_t2.npy", y_test_t2)
+        np.save("y_oof_t2.npy", y_pred_t2)
+
+    if K_flag and G_flag:
+        with timer('kaeru feature info'):
+            kaeru_cat_cols = None
+            predictors = list(set(common_cols + k_cols) - set([target] + remove + kaeru_drop_cols))
+
+            X = train.loc[:, predictors]
+            y = train.loc[:, target]
+            rescuer_id = train.loc[:, 'RescuerID'].iloc[:len_train]
+            X_test = X[len_train:]
+            X = X[:len_train]
+            y = y[:len_train]
+            X = X.iloc[extract_idx].reset_index(drop=True)
+            y = y[extract_idx].reset_index(drop=True)
+            rescuer_id = rescuer_id[extract_idx].reset_index(drop=True)
+
+        with timer('kaeru modeling'):
+            y_pred_k2 = np.empty(len(extract_idx), )
+            y_test_k2 = []
+            train_losses, valid_losses = [], []
+
+            # cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=1337)
+            # for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y)):
+            cv = StratifiedGroupKFold(n_splits=n_splits)
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
+                X_train = X.loc[train_index, :]
+                X_valid = X.loc[valid_index, :]
+                y_train = y[train_index]
+                y_valid = y[valid_index]
+
+                pred_val, pred_test, train_rmse, valid_rmse = run_model(X_train, y_train, X_valid, y_valid, X_test,
+                                                                        kaeru_cat_cols, predictors, maxvalue_dict,
+                                                                        fold_id, KAERU_PARAMS, MODEL_NAME + "_k")
+                y_pred_k2[valid_index] = pred_val
+                y_test_k2.append(pred_test)
+                train_losses.append(train_rmse)
+                valid_losses.append(valid_rmse)
+
+            y_test_k2 = np.mean(y_test_k2, axis=0)
+            logger.info(f'train RMSE = {np.mean(train_losses)}')
+            logger.info(f'valid RMSE = {np.mean(valid_losses)}')
+
+        np.save("y_test_k2.npy", y_test_k2)
+        np.save("y_oof_k2.npy", y_pred_k2)
+
     if T_flag and K_flag and G_flag:
-        y_pred = (y_pred_t[extract_idx] + y_pred_k[extract_idx] + y_pred_g) / 3
-        y_test = (y_test_t + y_test_k + y_test_g) / 3
+        y_pred = ((y_pred_t[extract_idx] + y_pred_t2) / 2 + (y_pred_k[extract_idx] + y_pred_k2) + y_pred_g) / 3
+        y_test = ((y_test_t + y_test_t2) / 2 + (y_test_k + y_test_k2) + y_test_g) / 3
     elif T_flag and K_flag:
         y_pred = y_pred_t * 0.5 + y_pred_k * 0.5
         y_test = y_test_t * 0.5 + y_test_k * 0.5

@@ -255,8 +255,8 @@ gege_drop_cols = ['2017GDPperCapita', 'Breed1_equals_Breed2', 'Bumiputra', 'Chin
                   'dog_cat_scores_mean_var', 'dog_cat_topics_mean_mean', 'dog_cat_topics_mean_sum',
                   'dog_cat_topics_mean_var', 'is_dog_or_cat_mean_mean', 'is_dog_or_cat_mean_sum',
                   'is_dog_or_cat_mean_var', 'len_text_mean_mean', 'len_text_mean_sum', 'len_text_mean_var']
-use_cols = pd.read_csv("../input/pet-usecols/importance7.csv")
-# use_cols = pd.read_csv("importance7.csv")
+use_cols = pd.read_csv("../input/pet-usecols/importance10.csv")
+# use_cols = pd.read_csv("importance9.csv")
 use_cols["gain"] = use_cols["gain"] / use_cols["gain"].sum()
 use_cols = list(use_cols[use_cols.gain > 0.0002].feature.values)
 
@@ -296,7 +296,7 @@ def timer(name):
     logger.info(f'[{name}] done in {time.time() - t0:.0f} s')
 
 
-def find_duplicates():
+def load_image_and_hash(paths):
     funcs = [
         imagehash.average_hash,
         imagehash.phash,
@@ -307,37 +307,46 @@ def find_duplicates():
 
     petids = []
     hashes = []
-    paths = glob.glob('../input/petfinder-adoption-prediction/*_images/*-1.jpg')
     for path in paths:
         image = Image.open(path)
         imageid = path.split('/')[-1].split('.')[0][:-2]
 
         petids.append(imageid)
         hashes.append(np.array([f(image).hash for f in funcs]).reshape(256))
+    return petids, np.array(hashes).astype(np.int32)
 
-    hashes_all = np.array(hashes)
-    sims = np.array([(hashes_all[i] == hashes_all).sum(axis=1) / 256 for i in range(hashes_all.shape[0])])
-    # hashes_all = torch.Tensor(hashes_all.astype(np.int32))
-    # hashes_all = torch.Tensor(hashes_all.astype(np.int32)).cuda()
-    # sims = np.array([(hashes_all[i] == hashes_all).sum(dim=1).cpu().numpy()/256 for i in range(hashes_all.shape[0])])
 
+def find_duplicates_all():
+    train_paths = glob.glob('../input/petfinder-adoption-prediction/train_images/*-1.jpg')
+    train_paths += glob.glob('../input/petfinder-adoption-prediction/train_images/*-2.jpg')
+    test_paths = glob.glob('../input/petfinder-adoption-prediction/test_images/*-1.jpg')
+    test_paths += glob.glob('../input/petfinder-adoption-prediction/test_images/*-2.jpg')
+
+    train_petids, train_hashes = load_image_and_hash(train_paths)
+    test_petids, test_hashes = load_image_and_hash(test_paths)
+
+    #     sims = np.array([(train_hashes[i] == test_hashes).sum(axis=1)/256 for i in range(train_hashes.shape[0])])
+    train_hashes = torch.Tensor(train_hashes).cuda()
+    test_hashes = torch.Tensor(test_hashes).cuda()
+    sims = np.array(
+        [(train_hashes[i] == test_hashes).sum(dim=1).cpu().numpy() / 256 for i in range(train_hashes.shape[0])])
     indices1 = np.where(sims > 0.9)
     indices2 = np.where(indices1[0] != indices1[1])
-    petids1 = [petids[i] for i in indices1[0][indices2]]
-    petids2 = [petids[i] for i in indices1[1][indices2]]
+    petids1 = [train_petids[i] for i in indices1[0][indices2]]
+    petids2 = [test_petids[i] for i in indices1[1][indices2]]
     dups = {tuple(sorted([petid1, petid2])): True for petid1, petid2 in zip(petids1, petids2)}
-    print('found %d duplicates' % len(dups))
+    logger.info('found %d duplicates' % len(dups))
 
     return dups
 
 
 def submission_with_postprocess(y_pred):
     df_sub = pd.read_csv('../input/petfinder-adoption-prediction/test/sample_submission.csv')
+    train = pd.read_csv('../input/petfinder-adoption-prediction/train/train.csv')
     df_sub["AdoptionSpeed"] = y_pred
     # postprocess
-    duplicated = find_duplicates()
-    duplicated = pd.DataFrame(duplicated, index=range(0)).T
-    duplicated = duplicated.reset_index()
+    duplicated = find_duplicates_all()
+    duplicated = pd.DataFrame(duplicated, index=range(0)).T.reset_index()
     duplicated.columns = ['pet_id_0', 'pet_id_1']
 
     duplicated_0 = duplicated.merge(train[['PetID', 'AdoptionSpeed']], how='left', left_on='pet_id_0',
@@ -867,11 +876,40 @@ def merge_breed_name_sub(train):
 
 
 def merge_breed_ranking(train):
-    breeds = pd.read_csv('../../input/breed-labels-with-ranks/breed_labels_with_ranks.csv')
+    breeds = pd.read_csv('../input/breed-labels-with-ranks/breed_labels_with_ranks.csv').drop("BreedName", axis=1)
     train = train.merge(breeds, how="left", left_on="fix_Breed1", right_on="BreedID")
     train = train.rename(columns={"BreedCatRank": "BreedCatRank_main", "BreedDogRank": "BreedDogRank_main"})
     train = train.merge(breeds, how="left", left_on="fix_Breed2", right_on="BreedID")
     train = train.rename(columns={"BreedCatRank": "BreedCatRank_second", "BreedDogRank": "BreedDogRank_second"})
+
+    return train
+
+
+def breed_mismatch(train):
+    breed_labels = pd.read_csv('../input/petfinder-adoption-prediction/breed_labels.csv')
+    dog_breed_labels_set = list(breed_labels[breed_labels['Type'] == 1]['BreedID'])
+    dog_breed_labels_set.remove(307)
+    train['breeds_mismatch'] = list((train['Type'] == 2) & (
+                (train['fix_Breed1'].isin(dog_breed_labels_set)) | (train['fix_Breed2'].isin(dog_breed_labels_set))))
+    train['breeds_mismatch'] = train['breeds_mismatch'].astype(int)
+
+    return train
+
+
+def breed_mismatch_desc(train):
+    train['desc_contain_dog'] = train['Description'].str.lower().str.contains(' dog | dogs ')
+    train['desc_contain_cat'] = train['Description'].str.lower().str.contains(' cat | cats ')
+    train['desc_miss_match'] = list((train['Type'] == 1) & (train['desc_contain_cat']))
+    train['desc_miss_match'] = train['desc_miss_match'].astype(int)
+
+    return train
+
+
+def breed_mismatch_meta(train):
+    train['annot_contain_dog'] = train['annots_top_desc'].str.lower().str.contains(' dog | dogs ')
+    train['annot_contain_cat'] = train['annots_top_desc'].str.lower().str.contains(' cat | cats ')
+    train['annot_miss_match'] = list((train['Type'] == 1) & (train['annot_contain_cat']))
+    train['annot_miss_match'] = train['annot_miss_match'].astype(int)
 
     return train
 
@@ -1173,7 +1211,7 @@ def w2v_pymagnitude(train_text, model, name):
         vec = vec / (n_w + 1)
         result.append(vec)
 
-    w2v_cols = ["{}_mag{}".format(name, i) for i in range(1, model.dim + 1)]
+    w2v_cols = ["{}{}".format(name, i) for i in range(1, model.dim + 1)]
     result = pd.DataFrame(result)
     result.columns = w2v_cols
 
@@ -1543,6 +1581,14 @@ if __name__ == '__main__':
             train_images = pd.DataFrame(image_files, columns=['image_filename'])
             train_images['PetID'] = train_images['image_filename'].apply(lambda x: x.split('/')[-1].split('-')[0])
 
+        with timer('breed mismatch features'):
+            train = breed_mismatch(train)
+            train = breed_mismatch_desc(train)
+            train = breed_mismatch_meta(train)
+            t_cols += ['breeds_mismatch', 'desc_contain_dog', 'desc_contain_cat', 'desc_miss_match',
+                       'annot_contain_dog', 'annot_contain_cat', 'annot_miss_match']
+            k_cols += ['breeds_mismatch', 'desc_miss_match', 'annot_miss_match']
+
         with timer('preprocess densenet'):
             if debug:
                 import feather
@@ -1604,7 +1650,7 @@ if __name__ == '__main__':
             with timer('merge emoji files'):
                 train = merge_emoji(train)
 
-            with timer('merge breed ranking files'):
+            with timer('preprocess breed files'):
                 train = merge_breed_ranking(train)
 
             with timer('preprocess and simple features'):
@@ -1786,7 +1832,7 @@ if __name__ == '__main__':
                                             + ['meta_desc_count_nmf_{}'.format(i) for i in range(n_components)]
                                             + ['meta_desc_count_bm25_{}'.format(i) for i in range(n_components)])
                 train = pd.concat([train, X], axis=1)
-                train.drop(['desc_bow'], axis=1, inplace=True)
+                train.drop(['desc_bow', 'desc'], axis=1, inplace=True)
 
             with timer('description fasttext'):
                 embedding = '../input/quora-embedding/GoogleNews-vectors-negative300.bin'
@@ -1799,24 +1845,10 @@ if __name__ == '__main__':
             with timer('description glove'):
                 embedding = "../input/pymagnitude-data/glove.840B.300d.magnitude"
                 model = Magnitude(embedding)
-                X = w2v_pymagnitude(train["Description_Emb"], model, name="glove")
+                X = w2v_pymagnitude(train["Description_Emb"], model, name="glove_mag")
                 train = pd.concat([train, X], axis=1)
                 del model;
                 gc.collect()
-
-            with timer('description glove wiki'):
-                embedding = "../input/pymagnitude-data/glove.6B.300d_wiki_light.magnitude"
-                model = Magnitude(embedding)
-                X = w2v_pymagnitude(train["Description_Emb"], model, name="glove_wiki_mag_light")
-                train = pd.concat([train, X], axis=1)
-
-            with timer('meta text glove wiki'):
-                train["desc_emb"] = [analyzer_emb(text) for text in train["desc"]]
-                X = w2v_pymagnitude(train["desc"], model, name="glove_wiki_mag_light_meta")
-                train = pd.concat([train, X], axis=1)
-                del model;
-                gc.collect()
-                train.drop(['desc_emb', 'desc'], axis=1, inplace=True)
 
             with timer('image features'):
                 train['num_images'] = train['PetID'].apply(lambda x: sum(train_images.PetID == x))
@@ -2006,17 +2038,9 @@ if __name__ == '__main__':
                 train['in_kanji'] = train.Description.apply(lambda x: is_zh(x))
 
             with timer('tfidf + svd / nmf'):
-                vectorizer = make_pipeline(
-                    TfidfVectorizer(),
-                    make_union(
-                        TruncatedSVD(n_components=n_components, random_state=kaeru_seed),
-                        NMF(n_components=n_components, random_state=kaeru_seed),
-                        n_jobs=1,
-                    ),
-                )
+                vectorizer = TruncatedSVD(n_components=n_components, random_state=kaeru_seed)
                 X = vectorizer.fit_transform(train['Description'])
-                X = pd.DataFrame(X, columns=['tfidf_k_svd_{}'.format(i) for i in range(n_components)]
-                                            + ['tfidf_k_nmf_{}'.format(i) for i in range(n_components)])
+                X = pd.DataFrame(X, columns=['tfidf_k_svd_{}'.format(i) for i in range(n_components)])
                 train = pd.concat([train, X], axis=1)
                 del vectorizer;
                 gc.collect()
@@ -2033,32 +2057,17 @@ if __name__ == '__main__':
                 train = pd.concat([train, X], axis=1)
 
             with timer('annots_top_desc + svd / nmf'):
-                vectorizer = make_pipeline(
-                    TfidfVectorizer(),
-                    make_union(
-                        TruncatedSVD(n_components=n_components, random_state=kaeru_seed),
-                        NMF(n_components=n_components, random_state=kaeru_seed),
-                        n_jobs=2,
-                    ),
-                )
+                vectorizer = TruncatedSVD(n_components=n_components, random_state=kaeru_seed)
                 X = vectorizer.fit_transform(train['annots_top_desc_pick'])
-                X = pd.DataFrame(X, columns=['annots_top_desc_k_svd_{}'.format(i) for i in range(n_components)]
-                                            + ['annots_top_desc_k_nmf_{}'.format(i) for i in range(n_components)])
+                X = pd.DataFrame(X, columns=['annots_top_desc_k_svd_{}'.format(i) for i in range(n_components)])
                 train = pd.concat([train, X], axis=1)
                 del vectorizer;
                 gc.collect()
 
             with timer('densenet features'):
-                vectorizer = make_pipeline(
-                    make_union(
-                        TruncatedSVD(n_components=n_components, random_state=kaeru_seed),
-                        NMF(n_components=n_components, random_state=kaeru_seed),
-                        n_jobs=2,
-                    ),
-                )
+                vectorizer = TruncatedSVD(n_components=n_components, random_state=kaeru_seed)
                 X = vectorizer.fit_transform(gp_dense_first.drop(['PetID'], axis=1))
-                X = pd.DataFrame(X, columns=['densenet121_svd_{}'.format(i) for i in range(n_components)]
-                                            + ['densenet121_nmf_{}'.format(i) for i in range(n_components)])
+                X = pd.DataFrame(X, columns=['densenet121_svd_{}'.format(i) for i in range(n_components)])
                 X["PetID"] = gp_dense_first["PetID"]
                 train = pd.merge(train, X, how="left", on="PetID")
                 del vectorizer;
@@ -2328,8 +2337,6 @@ if __name__ == '__main__':
             y_test_g = []
             train_losses, valid_losses = [], []
 
-            # cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=1337)
-            # for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y)):
             cv = StratifiedGroupKFold(n_splits=n_splits)
             for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
                 X_train = X.loc[train_index, :]
@@ -2387,4 +2394,5 @@ if __name__ == '__main__':
         logger.info(f'QWK = {score}')
         y_test = optR.predict(y_test, coefficients).astype(int)
 
-    submission_with_postprocess(y_test)
+    with timer('postprocess'):
+        submission_with_postprocess(y_test)
