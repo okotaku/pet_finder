@@ -31,10 +31,8 @@ from scipy.stats import rankdata
 from PIL import Image
 from pymagnitude import Magnitude
 from gensim.models import word2vec, KeyedVectors
-from gensim.scripts.glove2word2vec import glove2word2vec
 from gensim.models.doc2vec import Doc2Vec, TaggedDocument
 from contextlib import contextmanager
-from functools import partial
 from itertools import combinations
 from logging import getLogger, Formatter, StreamHandler, FileHandler, INFO
 from keras import backend as K
@@ -45,6 +43,12 @@ from keras.applications.inception_resnet_v2 import InceptionResNetV2
 from keras.layers import GlobalAveragePooling2D, Input, Lambda, AveragePooling1D
 from keras.models import Model
 from keras.preprocessing.text import text_to_word_sequence
+from keras.callbacks import *
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.sequence import pad_sequences
+from keras.layers import Dense, Input, CuDNNLSTM, Embedding, Dropout, CuDNNGRU, Conv1D
+from keras.layers import Bidirectional, GlobalMaxPooling1D, concatenate, BatchNormalization, PReLU
+from keras.layers import Reshape, Flatten, Concatenate, SpatialDropout1D, GlobalAveragePooling1D, Multiply
 from sklearn.decomposition import LatentDirichletAllocation, TruncatedSVD, NMF
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 from sklearn.metrics import cohen_kappa_score, mean_squared_error
@@ -53,6 +57,7 @@ from sklearn.pipeline import make_pipeline, make_union
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 from sklearn.feature_extraction.text import _document_frequency
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 
 
 # ===============
@@ -87,6 +92,10 @@ n_components_gege_img = 32
 n_components_gege_txt = 16
 img_size = 256
 batch_size = 256
+
+# feature engineering NN
+max_len=128
+n_important = 100
 
 # model
 MODEL_PARAMS = {
@@ -1384,8 +1393,193 @@ class StratifiedGroupKFold():
             train_index = indices[fold['fold_id'] != i]
             valid_index = indices[fold['fold_id'] == i]
             yield train_index, valid_index
-    
-    
+
+# ===============
+# NN
+# ===============
+class CyclicLR(Callback):
+    def __init__(self, base_lr=0.001, max_lr=0.006, step_size=2000., mode='triangular',
+                 gamma=1., scale_fn=None, scale_mode='cycle'):
+        super(CyclicLR, self).__init__()
+
+        self.base_lr = base_lr
+        self.max_lr = max_lr
+        self.step_size = step_size
+        self.mode = mode
+        self.gamma = gamma
+        if scale_fn == None:
+            if self.mode == 'triangular':
+                self.scale_fn = lambda x: 1.
+                self.scale_mode = 'cycle'
+            elif self.mode == 'triangular2':
+                self.scale_fn = lambda x: 1 / (2. ** (x - 1))
+                self.scale_mode = 'cycle'
+            elif self.mode == 'exp_range':
+                self.scale_fn = lambda x: gamma ** (x)
+                self.scale_mode = 'iterations'
+        else:
+            self.scale_fn = scale_fn
+            self.scale_mode = scale_mode
+        self.clr_iterations = 0.
+        self.trn_iterations = 0.
+        self.history = {}
+
+        self._reset()
+
+    def _reset(self, new_base_lr=None, new_max_lr=None,
+               new_step_size=None):
+        """Resets cycle iterations.
+        Optional boundary/step size adjustment.
+        """
+        if new_base_lr != None:
+            self.base_lr = new_base_lr
+        if new_max_lr != None:
+            self.max_lr = new_max_lr
+        if new_step_size != None:
+            self.step_size = new_step_size
+        self.clr_iterations = 0.
+
+    def clr(self):
+        cycle = np.floor(1 + self.clr_iterations / (2 * self.step_size))
+        x = np.abs(self.clr_iterations / self.step_size - 2 * cycle + 1)
+        if self.scale_mode == 'cycle':
+            return self.base_lr + (self.max_lr - self.base_lr) * np.maximum(0, (1 - x)) * self.scale_fn(cycle)
+        else:
+            return self.base_lr + (self.max_lr - self.base_lr) * np.maximum(0, (1 - x)) * self.scale_fn(
+                self.clr_iterations)
+
+    def on_train_begin(self, logs={}):
+        logs = logs or {}
+
+        if self.clr_iterations == 0:
+            K.set_value(self.model.optimizer.lr, self.base_lr)
+        else:
+            K.set_value(self.model.optimizer.lr, self.clr())
+
+    def on_batch_end(self, epoch, logs=None):
+
+        logs = logs or {}
+        self.trn_iterations += 1
+        self.clr_iterations += 1
+
+        self.history.setdefault('lr', []).append(K.get_value(self.model.optimizer.lr))
+        self.history.setdefault('iterations', []).append(self.trn_iterations)
+
+        for k, v in logs.items():
+            self.history.setdefault(k, []).append(v)
+
+        K.set_value(self.model.optimizer.lr, self.clr())
+
+
+def get_model(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.4, weight_decay=0.1):
+    inp_cats = []
+    embs = []
+    for c in categorical_features:
+        inp_cat = Input(shape=[1], name=c)
+        inp_cats.append(inp_cat)
+        embs.append((Embedding(X_train[c].max() + 1, emb_n)(inp_cat)))
+    for c in important_categorical:
+        inp_cat = Input(shape=[1], name=c)
+        inp_cats.append(inp_cat)
+        embs.append((Embedding(X_train[c].max() + 1, emb_n_imp)(inp_cat)))
+    cats = Flatten()(concatenate(embs))
+    cats = Dense(8, activation="linear")(cats)
+    cats = BatchNormalization()(cats)
+    cats = PReLU()(cats)
+    cats = Dropout(dout / 2)(cats)
+
+    inp_numerical = Input(shape=(len(numerical),), name="numerical")
+    inp_important_numerical = Input(shape=(len(important_numerical),), name="important_numerical")
+    nums = concatenate([inp_numerical, inp_important_numerical])
+    nums = Dense(32, activation="linear")(nums)
+    nums = BatchNormalization()(nums)
+    nums = PReLU()(nums)
+    nums = Dropout(dout)(nums)
+
+    inp_img = Input(shape=(len(img_cols),), name="img")
+    x_img = Dense(32, activation="linear")(inp_img)
+    x_img = BatchNormalization()(x_img)
+    x_img = PReLU()(x_img)
+    x_img = Dropout(dout)(x_img)
+
+    inp_desc = Input(shape=(max_len,), name="description")
+    emb_desc = Embedding(len(embedding_matrix), embedding_dim, weights=[embedding_matrix], trainable=False)(inp_desc)
+    emb_desc = SpatialDropout1D(0.2)(emb_desc)
+    x1 = Bidirectional(CuDNNLSTM(64, return_sequences=True))(emb_desc)
+    x2 = Bidirectional(CuDNNGRU(64, return_sequences=True))(x1)
+
+    max_pool2 = GlobalMaxPooling1D()(x2)
+    avg_pool2 = GlobalAveragePooling1D()(x2)
+    conc = Concatenate()([max_pool2, avg_pool2])
+    conc = BatchNormalization()(conc)
+
+    conc = Dense(32, activation="linear")(conc)
+    conc = BatchNormalization()(conc)
+    conc = PReLU()(conc)
+    conc = Dropout(dout)(conc)
+
+    x = concatenate([conc, x_img, nums, cats, inp_important_numerical])
+    x = Dropout(dout / 2)(x)
+
+    out = Dense(1, activation="linear")(x)
+
+    model = Model(inputs=inp_cats + [inp_numerical, inp_important_numerical, inp_img, inp_desc], outputs=out)
+    model.compile(optimizer="adam", loss=rmse)
+    return model
+
+def get_keras_data(df, description_embeds):
+    X = {
+        "numerical": df[numerical].values,
+        "important_numerical": df[important_numerical].values,
+        "description": description_embeds,
+        "img": df[img_cols]
+    }
+    for c in categorical_features + important_categorical:
+        X[c] = df[c]
+    return X
+
+def rmse(y, y_pred):
+    return K.sqrt(K.mean(K.square(y - y_pred), axis=-1))
+
+def w2v_fornn(train_text, model, max_len):
+    tokenizer = Tokenizer()
+    tokenizer.fit_on_texts(list(train_text))
+    train_text = tokenizer.texts_to_sequences(train_text)
+    train_text = pad_sequences(train_text, maxlen=max_len)
+    word_index = tokenizer.word_index
+
+    embedding_dim = model.dim
+    embedding_matrix = np.zeros((len(word_index) + 1, embedding_dim))
+
+    result = []
+    for word, i in word_index.items():
+        if word in model:  # 0.9906
+            embedding_matrix[i] = model.query(word)
+            continue
+        word_ = word.upper()
+        if word_ in model:  # 0.9909
+            embedding_matrix[i] = model.query(word_)
+            continue
+        word_ = word.capitalize()
+        if word_ in model:  # 0.9925
+            embedding_matrix[i] = model.query(word_)
+            continue
+        word_ = ps.stem(word)
+        if word_ in model:  # 0.9927
+            embedding_matrix[i] = model.query(word_)
+            continue
+        word_ = lc.stem(word)
+        if word_ in model:  # 0.9932
+            embedding_matrix[i] = model.query(word_)
+            continue
+        word_ = sb.stem(word)
+        if word_ in model:  # 0.9933
+            embedding_matrix[i] = model.query(word_)
+            continue
+        embedding_matrix[i] = model.query(word)
+
+    return train_text, embedding_matrix, embedding_dim, word_index
+
 if __name__ == '__main__':
     init_logger()
     seed_everything(seed=seed)
@@ -1714,6 +1908,10 @@ if __name__ == '__main__':
                 model = Magnitude(embedding)
                 X = w2v_pymagnitude(train["Description_Emb"], model, name="glove")
                 train = pd.concat([train, X], axis=1)
+
+            with timer('description glove for NN'):
+                X_desc, embedding_matrix, embedding_dim, word_index = w2v_fornn(train["Description_Emb"], model,
+                                                                                max_len)
                 del model; gc.collect()
                 
             with timer('meta text bow/tfidf->svd / nmf / bm25'): 
@@ -2082,7 +2280,7 @@ if __name__ == '__main__':
             X.to_feather("X_train_t.feather")
             X_test.reset_index(drop=True).to_feather("X_test_t.feather")
 
-        with timer('takuoko modeling'):
+        with timer('takuoko lgbm modeling'):
             y_pred_t = np.empty(len_train,)
             y_test_t = []
             train_losses, valid_losses = [], []
@@ -2107,6 +2305,71 @@ if __name__ == '__main__':
                                     
         np.save("y_test_t.npy",y_test_t)
         np.save("y_oof_t.npy", y_pred_t)
+
+        with timer('takuoko feature info for NN'):
+            img_cols = [c for c in t_cols if "dense" in c or "inception" in c]
+            numerical = [c for c in use_cols if c not in categorical_features and c not in img_cols]
+            important_numerical = [c for c in numerical if c in use_cols[:n_important]]
+            numerical = [c for c in numerical if c not in use_cols[:n_important]]
+            important_categorical = [c for c in categorical_features if c in use_cols[:n_important]]
+            categorical_features = [c for c in categorical_features if c not in use_cols[:n_important]]
+
+            train_cp = train[img_cols+numerical+important_numerical+categorical_features+important_categorical].copy()
+            for c in categorical_features + important_categorical:
+                train_cp[c] = LabelEncoder().fit_transform(train_cp[c])
+            train_cp.replace(np.inf, np.nan, inplace=True)
+            train_cp.replace(-np.inf, np.nan, inplace=True)
+            train_cp[important_numerical + numerical] = StandardScaler().fit_transform(
+                train_cp[important_numerical + numerical].rank())
+            train_cp.fillna(0, inplace=True)
+
+            X_test = train_cp.iloc[len_train:]
+            X_train = train_cp.iloc[:len_train]
+            X_desc_test = X_desc[len_train:]
+            X_desc_train = X_desc[:len_train]
+            del X_desc; gc.collect()
+
+        with timer('takuoko NN modeling'):
+            y_pred_t_nn = np.empty(len_train, )
+            y_test_t_nn = []
+            train_losses, valid_losses = [], []
+            x_test = get_keras_data(X_test, X_desc_test)
+
+            cv = StratifiedGroupKFold(n_splits=n_splits)
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
+                x_train = get_keras_data(X_train.iloc[train_index], X_desc_train[train_index])
+                x_valid = get_keras_data(X_train.iloc[valid_index], X_desc_train[valid_index])
+                y_train, y_valid = y[train_index], y[valid_index]
+
+                model = get_model(max_len, embedding_dim)
+                clr_tri = CyclicLR(base_lr=1e-5, max_lr=1e-2, step_size=len(X_train) // batch_size, mode="triangular2")
+                ckpt = ModelCheckpoint('model.hdf5', save_best_only=True,
+                                       monitor='val_loss', mode='min')
+                history = model.fit(x_train, y_train, batch_size=batch_size, validation_data=(x_valid, y_valid),
+                                    epochs=20, callbacks=[ckpt, clr_tri], verbose=2)
+                model.load_weights('model.hdf5')
+
+                y_pred_train = model.predict(x_train, batch_size=1000).reshape(-1, )
+                train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+
+                y_pred_valid = model.predict(x_valid, batch_size=1000).reshape(-1, )
+                valid_rmse = np.sqrt(mean_squared_error(y_valid, y_pred_valid))
+                y_pred_valid = rankdata(y_pred_valid) / len(y_pred_valid)
+                y_pred_t_nn[valid_index] = y_pred_valid
+
+                pred_test = model.predict(x_test, batch_size=batch_size).reshape(-1, )
+                pred_test = rankdata(pred_test) / len(pred_test)
+                y_test_t_nn.append(pred_test)
+
+                train_losses.append(train_rmse)
+                valid_losses.append(valid_rmse)
+
+            y_test_t_nn = np.mean(y_test_t_nn, axis=0)
+            logger.info(f'train RMSE = {np.mean(train_losses)}')
+            logger.info(f'valid RMSE = {np.mean(valid_losses)}')
+
+        np.save("y_test_t_nn.npy", y_test_t_nn)
+        np.save("y_oof_t_nn.npy", y_pred_t_nn)
     
     if K_flag:
         with timer('kaeru feature info'):
@@ -2224,8 +2487,8 @@ if __name__ == '__main__':
         np.save("extract_idx.npy", extract_idx)
     
     if T_flag and K_flag and G_flag:
-        y_pred = (y_pred_t[extract_idx] + y_pred_k[extract_idx] + y_pred_g) / 3
-        y_test = (y_test_t + y_test_k + y_test_g) / 3
+        y_pred = ((y_pred_t[extract_idx]+y_pred_t_nn[extract_idx])/2 + y_pred_k[extract_idx] + y_pred_g) / 3
+        y_test = ((y_test_t+y_test_t_nn)/2 + y_test_k + y_test_g) / 3
     elif T_flag and K_flag:
         y_pred = y_pred_t*0.5 + y_pred_k*0.5
         y_test = y_test_t*0.5 + y_test_k*0.5
