@@ -714,6 +714,72 @@ class BM25Transformer(BaseEstimator, TransformerMixin):
 
         return X
 
+class classification_feature(object):
+    '''
+    xgboostによる判別結果を特徴量にする
+    i.e. AdoptionSpeed=4か否かを判別するxgboostを学習, その予測確率を特徴量とする
+
+    Args:
+        X_train     : 学習データ
+        y_train     : 学習データ
+        X_test      : テストデータ
+        target_speed: 学習するAdoptionSpeed
+        n_split     : fold数
+        params      : xgboostのパラメータ
+
+    Returns:
+        (np.array) cls_feat_train, cls_feat_test
+    '''
+
+    def calc_feature(self, X_train, y_train, X_test, target_speed, n_split, params):
+        kf = StratifiedKFold(n_splits=n_split, shuffle=True, random_state=1337)
+
+        # vector to store features
+        cls_feat_train = np.zeros(X_train.shape[0])
+        cls_feat_test = np.zeros((X_test.shape[0], n_split))
+
+        cnt = 0
+        for train_idx, valid_idx in kf.split(X_train, y_train):
+            # train/valid split
+            X_tr = X_train.iloc[train_idx, :]
+            y_tr = y_train[train_idx]
+            X_val = X_train.iloc[valid_idx, :]
+            y_val = y_train[valid_idx]
+
+            # i.e. AdoptionSpeed : 0 -> 1, {1,2,3,4} -> 0
+            y_tr = y_tr.apply(lambda x: 1 if x == target_speed else 0)
+            y_val = y_val.apply(lambda x: 1 if x == target_speed else 0)
+
+            # create features using xgboost classifier
+            cls_feat_train[valid_idx], cls_feat_test[:, cnt] = self.xgb_classifier(X_tr, y_tr, X_val, y_val, X_test,
+                                                                                   cls_params)
+            cnt += 1
+
+        # rowMeans
+        cls_feat_test = np.mean(cls_feat_test, 1)
+
+        return cls_feat_train, cls_feat_test
+
+    def xgb_classifier(self, X_tr, y_tr, X_val, y_val, X_test, cls_params):
+        # train/valid
+        d_train = xgb.DMatrix(data=X_tr, label=y_tr, feature_names=X_tr.columns)
+        d_valid = xgb.DMatrix(data=X_val, label=y_val, feature_names=X_val.columns)
+
+        # train xgboost
+        watchlist = [(d_train, 'train'), (d_valid, 'valid')]
+        model = xgb.train(dtrain=d_train,
+                          evals=watchlist,
+                          params=cls_params,
+                          num_boost_round=cls_params['num_boost_round'],
+                          verbose_eval=cls_params['verbose_eval'],
+                          early_stopping_rounds=cls_params['early_stopping_rounds'])
+
+        # prediction (feature)
+        valid_pred = model.predict(xgb.DMatrix(X_val, feature_names=X_val.columns), ntree_limit=model.best_ntree_limit)
+        test_pred = model.predict(xgb.DMatrix(X_test, feature_names=X_test.columns), ntree_limit=model.best_ntree_limit)
+
+        return valid_pred, test_pred
+
 # ===============
 # For pet
 # ===============
@@ -2385,6 +2451,64 @@ if __name__ == '__main__':
             X.to_feather("X_train_k.feather")
             X_test.reset_index(drop=True).to_feather("X_test_k.feather")
 
+        with timer('kaeru classification features'):
+
+            cls_params = {
+                'objective': 'binary:logistic',
+                'eval_metric': 'auc',
+                'seed': 1337,
+                'eta': 0.0123,
+                'subsample': 0.8,
+                'colsample_bytree': 0.85,
+                'tree_method': 'gpu_hist',
+                'device': 'gpu',
+                'silent': 1,
+                'num_boost_round': 5000,
+                'early_stopping_rounds': 500,
+                'verbose_eval': 100
+            }
+
+            # beta-gaki for now
+            # classify AdoptionSpeed
+            cls_feat_generator = classification_feature()
+            n_split = 5
+
+            target_speed = 4
+            cls_feat_train_4, cls_feat_test_4 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+            target_speed = 3
+            cls_feat_train_3, cls_feat_test_3 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+            target_speed = 2
+            cls_feat_train_2, cls_feat_test_2 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+            target_speed = 1
+            cls_feat_train_1, cls_feat_test_1 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+            target_speed = 0
+            cls_feat_train_0, cls_feat_test_0 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+
+            X['speed4_flag'] = cls_feat_train_4
+            X_test['speed4_flag'] = cls_feat_test_4
+            predictors.append('speed4_flag')
+
+            X['speed3_flag'] = cls_feat_train_3
+            X_test['speed3_flag'] = cls_feat_test_3
+            predictors.append('speed3_flag')
+
+            X['speed2_flag'] = cls_feat_train_2
+            X_test['speed2_flag'] = cls_feat_test_2
+            predictors.append('speed2_flag')
+
+            X['speed1_flag'] = cls_feat_train_1
+            X_test['speed1_flag'] = cls_feat_test_1
+            predictors.append('speed1_flag')
+
+            X['speed0_flag'] = cls_feat_train_0
+            X_test['speed0_flag'] = cls_feat_test_0
+            predictors.append('speed0_flag')
+
         with timer('kaeru modeling'):
             y_pred_k = np.empty(len_train,)
             y_test_k = []
@@ -2455,10 +2579,68 @@ if __name__ == '__main__':
             
             del X_adv_tr, X_adv_tst, y_adv_tr, y_adv_tst, X_adv, y_adv, lgb_adv; gc.collect()
 
-        with timer('gege modeling'):
+        with timer('gege classification features'):
             X = X.iloc[extract_idx].reset_index(drop=True)
             y = y[extract_idx].reset_index(drop=True)
             rescuer_id = rescuer_id[extract_idx].reset_index(drop=True)
+
+            cls_params = {
+                'objective': 'binary:logistic',
+                'eval_metric': 'auc',
+                'seed': 1337,
+                'eta': 0.0123,
+                'subsample': 0.8,
+                'colsample_bytree': 0.85,
+                'tree_method': 'gpu_hist',
+                'device': 'gpu',
+                'silent': 1,
+                'num_boost_round': 5000,
+                'early_stopping_rounds': 500,
+                'verbose_eval': 100
+            }
+
+            # beta-gaki for now
+            # classify AdoptionSpeed
+            cls_feat_generator = classification_feature()
+            n_split = 5
+
+            target_speed = 4
+            cls_feat_train_4, cls_feat_test_4 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+            target_speed = 3
+            cls_feat_train_3, cls_feat_test_3 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+            target_speed = 2
+            cls_feat_train_2, cls_feat_test_2 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+            target_speed = 1
+            cls_feat_train_1, cls_feat_test_1 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+            target_speed = 0
+            cls_feat_train_0, cls_feat_test_0 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
+                                                                                cls_params)
+
+            X['speed4_flag'] = cls_feat_train_4
+            X_test['speed4_flag'] = cls_feat_test_4
+            predictors.append('speed4_flag')
+
+            X['speed3_flag'] = cls_feat_train_3
+            X_test['speed3_flag'] = cls_feat_test_3
+            predictors.append('speed3_flag')
+
+            X['speed2_flag'] = cls_feat_train_2
+            X_test['speed2_flag'] = cls_feat_test_2
+            predictors.append('speed2_flag')
+
+            X['speed1_flag'] = cls_feat_train_1
+            X_test['speed1_flag'] = cls_feat_test_1
+            predictors.append('speed1_flag')
+
+            X['speed0_flag'] = cls_feat_train_0
+            X_test['speed0_flag'] = cls_feat_test_0
+            predictors.append('speed0_flag')
+
+        with timer('gege modeling'):
             y_pred_g = np.empty(len(extract_idx),)
             y_test_g = []
             train_losses, valid_losses = [], []
