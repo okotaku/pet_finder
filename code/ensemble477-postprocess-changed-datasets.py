@@ -807,8 +807,50 @@ def merge_state_info(train):
     states = states.merge(state_info, how='left', on='StateName')
     train = train.merge(states, how='left', left_on='State', right_on='StateID')
     
-    return train    
-    
+    return train
+
+
+def merge_muslim_info(train):
+    df = pd.read_csv('../input/ped-additional-dataset/state_labels_with_muslim.csv')
+    cols = df.columns.drop(["StateID", "StateName"])
+    for c in cols:
+        df[c] = df[c].str.replace(",", "").astype("float32")
+
+    train.merge(df, how="left", left_on="State", right_on="StateID")
+
+    return train
+
+def merge_characteristics(train):
+    char_cat = pd.read_csv("../feature/cat_breed_characteristics.csv")
+    char_dog = pd.read_csv("../feature/dog_breed_characteristics.csv")
+    breed = pd.read_csv("../../input/petfinder-adoption-prediction/breed_labels.csv")
+
+    char = char_cat.append(char_dog).reset_index(drop=True)
+    char_cols = list(char.columns.drop(["BreedName", "AltBreedName"]))
+    cat = ["Fur", "Group1", "Group2", "LapCat"]
+    adv_cat = ["BreedName", "Temperment", "AltBreedName"]
+    char[list(char.columns.drop(cat + adv_cat))] = char[list(char.columns.drop(cat + adv_cat))].astype("float32")
+    for c in cat:
+        char[c] = LabelEncoder().fit_transform(char[c].fillna("nan").values)
+
+    breed = breed.merge(char, how="left", left_on="BreedName", right_on="BreedName")
+
+    train = train.merge(breed[["BreedID"] + char_cols], how="left", left_on="fix_Breed1", right_on="BreedID").drop(
+        "BreedID", axis=1)
+    dic = {}
+    for c in new_cols:
+        dic[c] = c + "_main"
+    train = train.rename(columns=dic)
+
+    train = train.merge(breed[["BreedID"] + char_cols], how="left", left_on="fix_Breed2", right_on="BreedID")
+    train = train.rename(columns={"BreedCatRank": "BreedCatRank_second", "BreedDogRank": "BreedDogRank_second"}).drop(
+        "BreedID", axis=1)
+    for c in new_cols:
+        dic[c] = c + "_second"
+    train = train.rename(columns=dic)
+
+    return train
+
 def merge_breed_name(train):
     breeds = pd.read_csv('../input/petfinder-adoption-prediction/breed_labels.csv')
     with open("../input/petfinderdatasets/rating.json", 'r', encoding='utf-8') as f:
@@ -1268,7 +1310,7 @@ def resize_to_square(im):
 def load_image(path):
     image = cv2.imread(path)
     new_image = resize_to_square(image)
-    return preprocess_input_dense(new_image), preprocess_input_incep(new_image), preprocess_input_nas(new_image)
+    return preprocess_input_dense(new_image), preprocess_input_incep(new_image)#, preprocess_input_nas(new_image)
 
 def get_age_feats(df):
     df["Age_year"] = (df["Age"] / 12).astype(np.int32)
@@ -1782,7 +1824,7 @@ if __name__ == '__main__':
                 backbone2 = InceptionResNetV2(input_tensor=inp2,
                                               weights='../input/petfinderdatasets/inception_resnet_v2_weights_tf_dim_ordering_tf_kernels_notop.h5',
                                               include_top=False)
-                x2 = backbone2.output
+                """x2 = backbone2.output
                 x2 = GlobalAveragePooling2D()(x2)
                 x2 = Lambda(lambda x: K.expand_dims(x, axis=-1))(x2)
                 x2 = AveragePooling1D(4)(x2)
@@ -1797,11 +1839,11 @@ if __name__ == '__main__':
                 x = Dropout(0.75)(backbone3.output)
                 x = Dense(10, activation='softmax')(x)
                 model_nasnet = Model(backbone3.input, x)
-                model_nasnet.load_weights('../input/copy-of-titu1994neuralimageassessment/nasnet_weights.h5')
+                model_nasnet.load_weights('../input/copy-of-titu1994neuralimageassessment/nasnet_weights.h5')"""
 
                 features_dense = []
                 features_inception = []
-                features_nasnet = []
+                #features_nasnet = []
                 for b in range(n_batches):
                     start = b * batch_size
                     end = (b + 1) * batch_size
@@ -1809,19 +1851,20 @@ if __name__ == '__main__':
                     batch_path = img_pathes[start: end]
                     batch_images_dense = np.zeros((len(batch_pets), img_size, img_size, 3))
                     batch_images_incep = np.zeros((len(batch_pets), img_size, img_size, 3))
-                    batch_images_nas = np.zeros((len(batch_pets), img_size, img_size, 3))
+                    #batch_images_nas = np.zeros((len(batch_pets), img_size, img_size, 3))
                     for i, (pet_id, path) in enumerate(zip(batch_pets, batch_path)):
                         try:
-                            batch_images_dense[i], batch_images_incep[i], batch_images_nas[i] = load_image(path)
+                            #batch_images_dense[i], batch_images_incep[i], batch_images_nas[i] = load_image(path)
+                            batch_images_dense[i], batch_images_incep[i] = load_image(path)
                         except:
                             pass
                     batch_preds_dense = model_dense.predict(batch_images_dense)
                     batch_preds_inception = model_inception.predict(batch_images_incep)
-                    batch_preds_nasnet = model_nasnet.predict(batch_images_nas)
+                    #batch_preds_nasnet = model_nasnet.predict(batch_images_nas)
                     for i, pet_id in enumerate(batch_pets):
                         features_dense.append([pet_id] + list(batch_preds_dense[i]))
                         features_inception.append([pet_id] + list(batch_preds_inception[i]))
-                        features_nasnet.append([pet_id] + list(batch_preds_nasnet[i]))
+                        #features_nasnet.append([pet_id] + list(batch_preds_nasnet[i]))
 
                 X = pd.DataFrame(features_dense, columns=["PetID"] + ["dense121_2_{}".format(i) for i in
                                                                       range(batch_preds_dense.shape[1])])
@@ -1840,20 +1883,24 @@ if __name__ == '__main__':
                 t_cols += list(gp_img.columns.drop("PetID"))
                 del gp_img, X; gc.collect()
 
-                X = pd.DataFrame(features_inception, columns=["PetID"] + ["features_nasnet{}".format(i) for i in
+                """X = pd.DataFrame(features_nasnet, columns=["PetID"] + ["features_nasnet{}".format(i) for i in
                                                                           range(batch_preds_nasnet.shape[1])])
                 gp_img = X.groupby("PetID").mean().reset_index()
                 train = pd.merge(train, gp_img, how="left", on="PetID")
                 t_cols += list(gp_img.columns.drop("PetID"))
                 add_t_cols += list(gp_img.columns.drop("PetID"))
                 del gp_img, X;
-                gc.collect()
+                gc.collect()"""
         
     if T_flag:
         with timer('takuoko features'): 
             orig_cols = train.columns
             with timer('merge emoji files'):   
                 train = merge_emoji(train)
+
+            with timer('merge additional files'):
+                train = merge_muslim_info(train)
+                train = merge_characteristics(train)
 
             with timer('preprocess and simple features'): 
                 train = get_interactions(train)
@@ -2475,64 +2522,6 @@ if __name__ == '__main__':
             X.to_feather("X_train_k.feather")
             X_test.reset_index(drop=True).to_feather("X_test_k.feather")
 
-        with timer('kaeru classification features'):
-
-            cls_params = {
-                'objective': 'binary:logistic',
-                'eval_metric': 'auc',
-                'seed': 1337,
-                'eta': 0.0123,
-                'subsample': 0.8,
-                'colsample_bytree': 0.85,
-                'tree_method': 'gpu_hist',
-                'device': 'gpu',
-                'silent': 1,
-                'num_boost_round': 5000,
-                'early_stopping_rounds': 500,
-                'verbose_eval': 100
-            }
-
-            # beta-gaki for now
-            # classify AdoptionSpeed
-            cls_feat_generator = classification_feature()
-            n_split = 5
-
-            target_speed = 4
-            cls_feat_train_4, cls_feat_test_4 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 3
-            cls_feat_train_3, cls_feat_test_3 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 2
-            cls_feat_train_2, cls_feat_test_2 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 1
-            cls_feat_train_1, cls_feat_test_1 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 0
-            cls_feat_train_0, cls_feat_test_0 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-
-            X['speed4_flag'] = cls_feat_train_4
-            X_test['speed4_flag'] = cls_feat_test_4
-            predictors.append('speed4_flag')
-
-            X['speed3_flag'] = cls_feat_train_3
-            X_test['speed3_flag'] = cls_feat_test_3
-            predictors.append('speed3_flag')
-
-            X['speed2_flag'] = cls_feat_train_2
-            X_test['speed2_flag'] = cls_feat_test_2
-            predictors.append('speed2_flag')
-
-            X['speed1_flag'] = cls_feat_train_1
-            X_test['speed1_flag'] = cls_feat_test_1
-            predictors.append('speed1_flag')
-
-            X['speed0_flag'] = cls_feat_train_0
-            X_test['speed0_flag'] = cls_feat_test_0
-            predictors.append('speed0_flag')
-
         with timer('kaeru modeling'):
             y_pred_k = np.empty(len_train,)
             y_test_k = []
@@ -2599,72 +2588,13 @@ if __name__ == '__main__':
 
             train_preds = lgb_adv.predict(X_adv.iloc[train_idx])
             extract_idx = np.argsort(-train_preds)[:int(len(train_idx)*0.85)]
-            np.save('extract_idx.npy', extract_idx)
-            
             del X_adv_tr, X_adv_tst, y_adv_tr, y_adv_tst, X_adv, y_adv, lgb_adv; gc.collect()
 
-        with timer('gege classification features'):
+        with timer('gege modeling'):
             X = X.iloc[extract_idx].reset_index(drop=True)
             y = y[extract_idx].reset_index(drop=True)
             rescuer_id = rescuer_id[extract_idx].reset_index(drop=True)
 
-            cls_params = {
-                'objective': 'binary:logistic',
-                'eval_metric': 'auc',
-                'seed': 1337,
-                'eta': 0.0123,
-                'subsample': 0.8,
-                'colsample_bytree': 0.85,
-                'tree_method': 'gpu_hist',
-                'device': 'gpu',
-                'silent': 1,
-                'num_boost_round': 5000,
-                'early_stopping_rounds': 500,
-                'verbose_eval': 100
-            }
-
-            # beta-gaki for now
-            # classify AdoptionSpeed
-            cls_feat_generator = classification_feature()
-            n_split = 5
-
-            target_speed = 4
-            cls_feat_train_4, cls_feat_test_4 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 3
-            cls_feat_train_3, cls_feat_test_3 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 2
-            cls_feat_train_2, cls_feat_test_2 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 1
-            cls_feat_train_1, cls_feat_test_1 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 0
-            cls_feat_train_0, cls_feat_test_0 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-
-            X['speed4_flag'] = cls_feat_train_4
-            X_test['speed4_flag'] = cls_feat_test_4
-            predictors.append('speed4_flag')
-
-            X['speed3_flag'] = cls_feat_train_3
-            X_test['speed3_flag'] = cls_feat_test_3
-            predictors.append('speed3_flag')
-
-            X['speed2_flag'] = cls_feat_train_2
-            X_test['speed2_flag'] = cls_feat_test_2
-            predictors.append('speed2_flag')
-
-            X['speed1_flag'] = cls_feat_train_1
-            X_test['speed1_flag'] = cls_feat_test_1
-            predictors.append('speed1_flag')
-
-            X['speed0_flag'] = cls_feat_train_0
-            X_test['speed0_flag'] = cls_feat_test_0
-            predictors.append('speed0_flag')
-
-        with timer('gege modeling'):
             y_pred_g = np.empty(len(extract_idx),)
             y_test_g = []
             train_losses, valid_losses = [], []
