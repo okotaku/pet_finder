@@ -40,8 +40,6 @@ from keras.applications.densenet import preprocess_input as preprocess_input_den
 from keras.applications.densenet import DenseNet121
 from keras.applications.inception_resnet_v2 import preprocess_input as preprocess_input_incep
 from keras.applications.inception_resnet_v2 import InceptionResNetV2
-from keras.applications.nasnet import preprocess_input as preprocess_input_nas
-from keras.applications.nasnet import NASNetMobile
 from keras.layers import GlobalAveragePooling2D, Input, Lambda, AveragePooling1D
 from keras.models import Model
 from keras.preprocessing.text import text_to_word_sequence
@@ -78,8 +76,8 @@ T_flag = True
 K_flag = True
 G_flag = True
 debug = False
-    
-    
+
+
 # ===============
 # Params
 # ===============
@@ -124,6 +122,31 @@ MODEL_PARAMS = {
     'nthread': -1,
     'seed': 777,
 }
+MODEL_PARAMS_CLASSIFIER = {
+    'task': 'train',
+    'boosting_type': 'gbdt',
+    'objective': 'multiclass',
+    'num_class': 5,
+    'metric': 'multi_logloss',
+    'learning_rate': 0.01,
+    'num_leaves': 63,
+    'subsample': 0.9,
+    'subsample_freq': 1,
+    #'colsample_bytree': 0.6,
+    'max_depth': 9,
+    'max_bin': 127,
+    'reg_alpha': 0.11,
+    'reg_lambda': 0.01,
+    'min_child_weight': 0.2,
+    'min_child_samples': 20,
+    'min_gain_to_split': 0.02,
+    'min_data_in_bin': 3,
+    'bin_construct_sample_cnt': 5000,
+    'cat_l2': 10,
+    'verbose': -1,
+    'nthread': 16,
+    'seed': 777,
+}
 KAERU_PARAMS = {'application': 'regression',
           'boosting': 'gbdt',
           'metric': 'rmse',
@@ -150,7 +173,7 @@ ADV_PARAMS = {
     'verbose': 0,
     'lambda_l1': 0.1,
     'seed': 1213
-} 
+}
 MODEL_PARAMS_XGB = {
     'eval_metric': 'rmse',
     'seed': 1337,
@@ -205,18 +228,18 @@ contraction_mapping = {u"ain’t": u"is not", u"aren’t": u"are not",u"can’t"
                        u"might’ve": u"might have",u"mightn’t": u"might not",u"mightn’t’ve": u"might not have",
                        u"must’ve": u"must have", u"mustn’t": u"must not", u"mustn’t’ve": u"must not have",
                        u"needn’t": u"need not", u"needn’t’ve": u"need not have",u"o’clock": u"of the clock",
-                       u"oughtn’t": u"ought not", u"oughtn’t’ve": u"ought not have", u"shan’t": u"shall not", 
+                       u"oughtn’t": u"ought not", u"oughtn’t’ve": u"ought not have", u"shan’t": u"shall not",
                        u"sha’n’t": u"shall not", u"shan’t’ve": u"shall not have", u"she’d": u"she would",
                        u"she’d’ve": u"she would have", u"she’ll": u"she will", u"she’ll’ve": u"she will have",
                        u"she’s": u"she is", u"should’ve": u"should have", u"shouldn’t": u"should not",
                        u"shouldn’t’ve": u"should not have", u"so’ve": u"so have",u"so’s": u"so as",
                        u"this’s": u"this is",u"that’d": u"that would", u"that’d’ve": u"that would have",
                        u"that’s": u"that is", u"there’d": u"there would", u"there’d’ve": u"there would have",
-                       u"there’s": u"there is", u"here’s": u"here is",u"they’d": u"they would", 
-                       u"they’d’ve": u"they would have", u"they’ll": u"they will", 
-                       u"they’ll’ve": u"they will have", u"they’re": u"they are", u"they’ve": u"they have", 
+                       u"there’s": u"there is", u"here’s": u"here is",u"they’d": u"they would",
+                       u"they’d’ve": u"they would have", u"they’ll": u"they will",
+                       u"they’ll’ve": u"they will have", u"they’re": u"they are", u"they’ve": u"they have",
                        u"to’ve": u"to have", u"wasn’t": u"was not", u"we’d": u"we would",
-                       u"we’d’ve": u"we would have", u"we’ll": u"we will", u"we’ll’ve": u"we will have", 
+                       u"we’d’ve": u"we would have", u"we’ll": u"we will", u"we’ll’ve": u"we will have",
                        u"we’re": u"we are", u"we’ve": u"we have", u"weren’t": u"were not",
                        u"what’ll": u"what will", u"what’ll’ve": u"what will have", u"what’re": u"what are",
                        u"what’s": u"what is", u"what’ve": u"what have", u"when’s": u"when is",
@@ -250,9 +273,9 @@ contraction_mapping = {u"ain’t": u"is not", u"aren’t": u"are not",u"can’t"
                       u"enxiety": u"anxiety", u"vaksin": u"vaccine"}
 numerical_features = []
 text_features = ['Name', 'Description', 'Description_Emb', 'Description_bow']
-meta_text =  ['BreedName_main_breed', 'BreedName_second_breed', 'annots_top_desc', 'sentiment_text', 
+meta_text =  ['BreedName_main_breed', 'BreedName_second_breed', 'annots_top_desc', 'sentiment_text',
               'annots_top_desc_pick', 'sentiment_entities']
-remove = ['index', 'seq_text', 'PetID', 'Name', 'Description', 'RescuerID', 'StateName', 'annots_top_desc','sentiment_text', 
+remove = ['index', 'seq_text', 'PetID', 'Name', 'Description', 'RescuerID', 'StateName', 'annots_top_desc','sentiment_text',
           'sentiment_entities', 'Description_Emb', 'Description_bow', 'annots_top_desc_pick']
 kaeru_drop_cols = ["2017GDPperCapita", "Bumiputra", "Chinese", "HDI", "Indian", "Latitude", "Longitude",
                    'color_red_score_mean_mean', 'color_red_score_mean_sum', 'color_blue_score_mean_mean',
@@ -262,11 +285,11 @@ kaeru_drop_cols = ["2017GDPperCapita", "Bumiputra", "Chinese", "HDI", "Indian", 
                    'len_text_mean_mean', 'len_text_mean_sum', 'StateID']
 gege_drop_cols = ['2017GDPperCapita', 'Breed1_equals_Breed2', 'Bumiputra', 'Chinese',
                   'HDI', 'Indian','Latitude', 'Longitude', 'Pop_density', 'Urban_pop', 'Breed1_equals_Breed2',
-                  'fix_Breed1', 'fix_Breed2', 'single_Breed', 'color_red_score_mean_mean', 'color_red_score_mean_sum', 
-                  'color_red_score_mean_var',  'color_blue_score_mean_mean', 'color_blue_score_mean_sum', 
+                  'fix_Breed1', 'fix_Breed2', 'single_Breed', 'color_red_score_mean_mean', 'color_red_score_mean_sum',
+                  'color_red_score_mean_var',  'color_blue_score_mean_mean', 'color_blue_score_mean_sum',
                    'color_blue_score_mean_var', 'color_green_score_mean_mean', 'color_green_score_mean_sum',
-                  'color_green_score_mean_var', 'dog_cat_scores_mean_mean', 'dog_cat_scores_mean_sum', 
-                  'dog_cat_scores_mean_var', 'dog_cat_topics_mean_mean', 'dog_cat_topics_mean_sum', 
+                  'color_green_score_mean_var', 'dog_cat_scores_mean_mean', 'dog_cat_scores_mean_sum',
+                  'dog_cat_scores_mean_var', 'dog_cat_topics_mean_mean', 'dog_cat_topics_mean_sum',
                    'dog_cat_topics_mean_var', 'is_dog_or_cat_mean_mean', 'is_dog_or_cat_mean_sum',
                   'is_dog_or_cat_mean_var', 'len_text_mean_mean', 'len_text_mean_sum', 'len_text_mean_var']
 use_cols = pd.read_csv("../input/pet-usecols/importance4.csv")
@@ -314,7 +337,7 @@ def seed_everything(seed=1234):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
-    
+
 def load_image_and_hash(paths):
     funcs = [
         imagehash.average_hash,
@@ -333,13 +356,13 @@ def load_image_and_hash(paths):
         petids.append(imageid)
         hashes.append(np.array([f(image).hash for f in funcs]).reshape(256))
     return petids, np.array(hashes).astype(np.int32)
-    
+
 def find_duplicates_all():
     train_paths = glob.glob('../input/petfinder-adoption-prediction/train_images/*-1.jpg')
     train_paths += glob.glob('../input/petfinder-adoption-prediction/train_images/*-2.jpg')
     test_paths = glob.glob('../input/petfinder-adoption-prediction/test_images/*-1.jpg')
     test_paths += glob.glob('../input/petfinder-adoption-prediction/test_images/*-2.jpg')
-    
+
     train_petids, train_hashes = load_image_and_hash(train_paths)
     test_petids, test_hashes = load_image_and_hash(test_paths)
 
@@ -355,7 +378,7 @@ def find_duplicates_all():
     logger.info('found %d duplicates' % len(dups))
 
     return dups
-    
+
 def submission_with_postprocess(y_pred):
     df_sub = pd.read_csv('../input/petfinder-adoption-prediction/test/sample_submission.csv')
     train = pd.read_csv('../input/petfinder-adoption-prediction/train/train.csv')
@@ -366,21 +389,21 @@ def submission_with_postprocess(y_pred):
     duplicated.columns = ['pet_id_0', 'pet_id_1']
 
     duplicated_0 = duplicated.merge(train[['PetID', 'AdoptionSpeed']], how='left', left_on='pet_id_0', right_on='PetID').dropna()
-    df_sub = df_sub.merge(duplicated_0[['pet_id_1', 'AdoptionSpeed']], 
+    df_sub = df_sub.merge(duplicated_0[['pet_id_1', 'AdoptionSpeed']],
                           how='left', left_on='PetID', right_on='pet_id_1', suffixes=('_original', ''))
     df_sub['AdoptionSpeed'].fillna(df_sub['AdoptionSpeed_original'], inplace=True)
     df_sub = df_sub[['PetID', 'AdoptionSpeed']]
 
-    duplicated_1 = duplicated.merge(train[['PetID', 'AdoptionSpeed']], 
+    duplicated_1 = duplicated.merge(train[['PetID', 'AdoptionSpeed']],
                                     how='left', left_on='pet_id_1', right_on='PetID').dropna()
-    df_sub = df_sub.merge(duplicated_1[['pet_id_0', 'AdoptionSpeed']], 
+    df_sub = df_sub.merge(duplicated_1[['pet_id_0', 'AdoptionSpeed']],
                           how='left', left_on='PetID', right_on='pet_id_0', suffixes=('_original', ''))
     df_sub['AdoptionSpeed'].fillna(df_sub['AdoptionSpeed_original'], inplace=True)
     df_sub = df_sub[['PetID', 'AdoptionSpeed']]
     df_sub['AdoptionSpeed'] = df_sub['AdoptionSpeed'].astype('int32')
     # submission
     df_sub.to_csv('submission.csv', index=False)
-    
+
 def submission(y_pred):
     logger.info('making submission file...')
     df_sub = pd.read_csv('../input/petfinder-adoption-prediction/test/sample_submission.csv')
@@ -400,7 +423,7 @@ def analyzer_bow(text):
             text = text.replace(bad_word, contraction_mapping[bad_word])
     text = text.split(' ') # スペースで区切る
     text = [sb.stem(t) for t in text]
-    
+
     words = []
     for word in text:
         if (re.compile(r'^.*[0-9]+.*$').fullmatch(word) is not None): # 数字が含まれるものは分割
@@ -412,7 +435,7 @@ def analyzer_bow(text):
         if len(word) < 2: #  1文字、0文字（空文字）は除外
             continue
         words.append(word)
-        
+
     return " ".join(words)
 
 def analyzer_embed(text):
@@ -426,7 +449,7 @@ def analyzer_embed(text):
         if bad_word in text:
             text = text.replace(bad_word, contraction_mapping[bad_word])
     text = text.split(' ') # スペースで区切る
-    
+
     words = []
     for word in text:
         if (re.compile(r'^.*[0-9]+.*$').fullmatch(word) is not None): # 数字が含まれるものは分割
@@ -436,17 +459,17 @@ def analyzer_embed(text):
         if len(word) < 1: #  0文字（空文字）は除外
             continue
         words.append(word)
-        
+
     return " ".join(words)
 
-def analyzer_k(text):    
+def analyzer_k(text):
     stop_words = ['i', 'a', 'an', 'the', 'to', 'and', 'or', 'if', 'is', 'are', 'am', 'it', 'this', 'that', 'of', 'from', 'in', 'on']
     text = text.lower() # 小文字化
     text = text.replace('\n', '') # 改行削除
     text = text.replace('\t', '') # タブ削除
     text = re.sub(re.compile(r'[!-\/:-@[-`{-~]'), ' ', text) # 記号をスペースに置き換え
     text = text.split(' ') # スペースで区切る
-    
+
     words = []
     for word in text:
         if (re.compile(r'^.*[0-9]+.*$').fullmatch(word) is not None): # 数字が含まれるものは除外
@@ -456,9 +479,9 @@ def analyzer_k(text):
         if len(word) < 2: #  1文字、0文字（空文字）は除外
             continue
         words.append(word)
-        
+
     return words
-    
+
 # ===============
 # Feature Engineering
 # ===============
@@ -530,10 +553,10 @@ class GroupbyTransformer():
 class DiffGroupbyTransformer(GroupbyTransformer):
     def _aggregate(self):
         raise NotImplementedError
-        
+
     def _merge(self):
         raise NotImplementedError
-    
+
     def transform(self, dataframe):
         for param_dict in self.param_dict:
             key, var, agg, on = self._get_params(param_dict)
@@ -557,10 +580,10 @@ class DiffGroupbyTransformer(GroupbyTransformer):
 class RatioGroupbyTransformer(GroupbyTransformer):
     def _aggregate(self):
         raise NotImplementedError
-        
+
     def _merge(self):
         raise NotImplementedError
-    
+
     def transform(self, dataframe):
         for param_dict in self.param_dict:
             key, var, agg, on = self._get_params(param_dict)
@@ -579,11 +602,11 @@ class RatioGroupbyTransformer(GroupbyTransformer):
             else:
                 _agg.append(a)
         return ['_'.join(['ratio', a, v, 'groupby'] + key) for v in var for a in _agg]
-    
-    
+
+
 class CategoryVectorizer():
-    def __init__(self, categorical_columns, n_components, 
-                 vectorizer=CountVectorizer(), 
+    def __init__(self, categorical_columns, n_components,
+                 vectorizer=CountVectorizer(),
                  transformer=LatentDirichletAllocation(),
                  name='CountLDA'):
         self.categorical_columns = categorical_columns
@@ -591,7 +614,7 @@ class CategoryVectorizer():
         self.vectorizer = vectorizer
         self.transformer = transformer
         self.name = name + str(self.n_components)
-        
+
     def transform(self, dataframe):
         features = []
         for (col1, col2) in self.get_column_pairs():
@@ -612,7 +635,7 @@ class CategoryVectorizer():
         for val1, val2 in zip(dataframe[col1].values, dataframe[col2].values):
             col2_list[int(val1)].append(col2+str(val2))
         return [' '.join(map(str, ls)) for ls in col2_list]
-    
+
     def get_feature(self, dataframe, col1, col2, latent_vector, name=''):
         features = np.zeros(
             shape=(len(dataframe), self.n_components), dtype=np.float32)
@@ -622,13 +645,13 @@ class CategoryVectorizer():
             features[i, :self.n_components] = latent_vector[val1]
 
         return pd.DataFrame(data=features, columns=self.columns)
-    
+
     def get_column_pairs(self):
         return [(col1, col2) for col1, col2 in itertools.product(self.categorical_columns, repeat=2) if col1 != col2]
 
     def get_numerical_features(self):
         return self.columns
-    
+
 class BM25Transformer(BaseEstimator, TransformerMixin):
     """
     Parameters
@@ -782,6 +805,45 @@ class classification_feature(object):
 
         return valid_pred, test_pred
 
+def reduce_mem_usage(df):
+    """ iterate through all the columns of a dataframe and modify the data type
+        to reduce memory usage.
+    """
+    start_mem = df.memory_usage().sum() / 1024 ** 2
+    logger.info('Memory usage of dataframe is {:.2f} MB'.format(start_mem))
+    logger.infot("column = ", len(df.columns))
+    for i, col in enumerate(df.columns):
+        try:
+            col_type = df[col].dtype
+
+            if col_type != object:
+                c_min = df[col].min()
+                c_max = df[col].max()
+                if str(col_type)[:3] == 'int':
+                    if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
+                        df[col] = df[col].astype(np.int8)
+                    elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+                        df[col] = df[col].astype(np.int16)
+                    elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+                        df[col] = df[col].astype(np.int32)
+                    elif c_min > np.iinfo(np.int64).min and c_max < np.iinfo(np.int64).max:
+                        df[col] = df[col].astype(np.int32)
+                else:
+                    if c_min > np.finfo(np.float16).min and c_max < np.finfo(np.float16).max:
+                        df[col] = df[col].astype(np.float32)
+                    elif c_min > np.finfo(np.float32).min and c_max < np.finfo(np.float32).max:
+                        df[col] = df[col].astype(np.float32)
+                    else:
+                        df[col] = df[col].astype(np.float32)
+        except:
+            continue
+
+    end_mem = df.memory_usage().sum() / 1024 ** 2
+    logger.info('Memory usage after optimization is: {:.2f} MB'.format(end_mem))
+    logger.info('Decreased by {:.1f}%'.format(100 * (start_mem - end_mem) / start_mem))
+
+    return df
+
 # ===============
 # For pet
 # ===============
@@ -789,7 +851,7 @@ def merge_state_info(train):
     states = pd.read_csv('../input/petfinder-adoption-prediction/state_labels.csv')
     state_info = pd.read_csv('../input/state-info/state_info.csv')
     state_info.rename(columns={
-        'Area (km2)': 'Area', 
+        'Area (km2)': 'Area',
         'Pop. density': 'Pop_density',
         'Urban pop.(%)': 'Urban_pop',
         'Bumiputra (%)': 'Bumiputra',
@@ -806,50 +868,9 @@ def merge_state_info(train):
 
     states = states.merge(state_info, how='left', on='StateName')
     train = train.merge(states, how='left', left_on='State', right_on='StateID')
-    
-    return train
-
-
-def merge_muslim_info(train):
-    df = pd.read_csv('../input/ped-additional-dataset/state_labels_with_muslim.csv')
-    cols = df.columns.drop(["StateID", "StateName"])
-    for c in cols:
-        df[c] = df[c].str.replace(",", "").astype("float32")
-
-    train.merge(df, how="left", left_on="State", right_on="StateID")
 
     return train
 
-def merge_characteristics(train):
-    char_cat = pd.read_csv("../feature/cat_breed_characteristics.csv")
-    char_dog = pd.read_csv("../feature/dog_breed_characteristics.csv")
-    breed = pd.read_csv("../../input/petfinder-adoption-prediction/breed_labels.csv")
-
-    char = char_cat.append(char_dog).reset_index(drop=True)
-    char_cols = list(char.columns.drop(["BreedName", "AltBreedName"]))
-    cat = ["Fur", "Group1", "Group2", "LapCat"]
-    adv_cat = ["BreedName", "Temperment", "AltBreedName"]
-    char[list(char.columns.drop(cat + adv_cat))] = char[list(char.columns.drop(cat + adv_cat))].astype("float32")
-    for c in cat:
-        char[c] = LabelEncoder().fit_transform(char[c].fillna("nan").values)
-
-    breed = breed.merge(char, how="left", left_on="BreedName", right_on="BreedName")
-
-    train = train.merge(breed[["BreedID"] + char_cols], how="left", left_on="fix_Breed1", right_on="BreedID").drop(
-        "BreedID", axis=1)
-    dic = {}
-    for c in new_cols:
-        dic[c] = c + "_main"
-    train = train.rename(columns=dic)
-
-    train = train.merge(breed[["BreedID"] + char_cols], how="left", left_on="fix_Breed2", right_on="BreedID")
-    train = train.rename(columns={"BreedCatRank": "BreedCatRank_second", "BreedDogRank": "BreedDogRank_second"}).drop(
-        "BreedID", axis=1)
-    for c in new_cols:
-        dic[c] = c + "_second"
-    train = train.rename(columns=dic)
-
-    return train
 
 def merge_breed_name(train):
     breeds = pd.read_csv('../input/petfinder-adoption-prediction/breed_labels.csv')
@@ -903,7 +924,7 @@ def merge_breed_name(train):
         }, inplace=True
         )
     breeds = breeds.merge(df, how='left', on='BreedName')
-    
+
     breeds1_dic, breeds2_dic = {}, {}
     for c in breeds.columns:
         if c == "BreedID":
@@ -914,7 +935,7 @@ def merge_breed_name(train):
     train.drop(['BreedID'], axis=1, inplace=True)
     train = train.merge(breeds.rename(columns=breeds2_dic), how='left', left_on='Breed2', right_on='BreedID')
     train.drop(['BreedID'], axis=1, inplace=True)
-    
+
     return train
 
 def merge_breed_name_sub(train):
@@ -979,30 +1000,30 @@ def merge_breed_name_sub(train):
     train.drop(['BreedID'], axis=1, inplace=True)
     train = train.merge(breeds.rename(columns={'BreedName': 'BreedName_second_breed'}), how='left', left_on='Breed2', right_on='BreedID', suffixes=('', '_second_breed'))
     train.drop(['BreedID'], axis=1, inplace=True)
-    
+
     return train
-      
+
 def extract_emojis(text, emoji_list):
     return ' '.join(c for c in text if c in emoji_list)
-    
+
 def merge_emoji(train):
     emoji = pd.read_csv('../input/petfinderdatasets/Emoji_Sentiment_Data_v1.0.csv')
     emoji2 = pd.read_csv('../input/petfinderdatasets/Emojitracker_20150604.csv')
     emoji = emoji.merge(emoji2, how='left', on='Emoji', suffixes=('', '_tracker'))
-    
+
     emoji_list = emoji['Emoji'].values
     train_emoji = train['Description'].apply(extract_emojis, emoji_list=emoji_list)
     train_emoji = pd.DataFrame([train['PetID'], train_emoji]).T.set_index('PetID')
     train_emoji = train_emoji['Description'].str.extractall('(' + ')|('.join(emoji_list) + ')')
     train_emoji = train_emoji.fillna(method='bfill', axis=1).iloc[:, 0].reset_index().rename(columns={0: 'Emoji'})
     train_emoji = train_emoji.merge(emoji, how='left', on='Emoji')
-    
+
     emoji_columns = ['Occurrences', 'Position', 'Negative', 'Neutral', 'Positive', 'Occurrences_tracker']
     stats = ['mean', 'max', 'min', 'median', 'std']
     g = train_emoji.groupby('PetID')[emoji_columns].agg(stats)
     g.columns = [c + '_' + stat for c in emoji_columns for stat in stats]
     train = train.merge(g, how='left', on='PetID')
-    
+
     return train
 
 def get_interactions(train):
@@ -1017,7 +1038,7 @@ def get_text_features(train):
     train['Length_annots_top_desc'] = train['annots_top_desc'].map(len)
     train['Lengths_sentiment_text'] = train['sentiment_text'].map(len)
     train['Lengths_sentiment_entities'] = train['sentiment_entities'].map(len)
-    
+
     return train
 
 def get_name_features(train):
@@ -1031,7 +1052,7 @@ def get_name_features(train):
     train['num_name_words'] = train['Name'].apply(lambda x: len(x.split()))
     return train
 
-class MetaDataParser(object):   
+class MetaDataParser(object):
     def __init__(self):
         # sentiment files
         train_sentiment_files = sorted(glob.glob('../input/petfinder-adoption-prediction/train_sentiment/*.json'))
@@ -1039,19 +1060,19 @@ class MetaDataParser(object):
         sentiment_files = train_sentiment_files + test_sentiment_files
         self.sentiment_files = pd.DataFrame(sentiment_files, columns=['sentiment_filename'])
         self.sentiment_files['PetID'] = self.sentiment_files['sentiment_filename'].apply(lambda x: x.split('/')[-1].split('.')[0])
-        
+
         # metadata files
         train_metadata_files = sorted(glob.glob('../input/petfinder-adoption-prediction/train_metadata/*.json'))
         test_metadata_files = sorted(glob.glob('../input/petfinder-adoption-prediction/test_metadata/*.json'))
         metadata_files = train_metadata_files + test_metadata_files
         self.metadata_files = pd.DataFrame(metadata_files, columns=['metadata_filename'])
         self.metadata_files['PetID'] = self.metadata_files['metadata_filename'].apply(lambda x: x.split('/')[-1].split('-')[0])
-    
+
     def open_json_file(self, filename):
         with open(filename, 'r', encoding="utf-8") as f:
             metadata_file = json.load(f)
         return metadata_file
-    
+
     def get_stats(self, array, name):
         stats = [np.mean, np.max, np.min, np.sum, np.var]
         result = {}
@@ -1062,7 +1083,7 @@ class MetaDataParser(object):
             for stat in stats:
                 result[name + '_' + stat.__name__] = 0
         return result
-            
+
     def parse_sentiment_file(self, file):
         file_sentiment = file['documentSentiment']
         file_entities = [x['name'] for x in file['entities']]
@@ -1075,23 +1096,23 @@ class MetaDataParser(object):
         file_sentences_sentiment_sum = pd.DataFrame.from_dict(
             file_sentences_sentiment, orient='columns').sum()
         file_sentences_sentiment_sum = file_sentences_sentiment_sum.add_prefix('document_sum_').to_dict()
-        
+
         file_sentences_sentiment_mean = pd.DataFrame.from_dict(
             file_sentences_sentiment, orient='columns').mean()
         file_sentences_sentiment_mean = file_sentences_sentiment_mean.add_prefix('document_mean_').to_dict()
-        
+
         file_sentences_sentiment_var = pd.DataFrame.from_dict(
             file_sentences_sentiment, orient='columns').sum()
         file_sentences_sentiment_var = file_sentences_sentiment_var.add_prefix('document_var_').to_dict()
-        
+
         file_sentiment.update(file_sentences_sentiment_mean)
         file_sentiment.update(file_sentences_sentiment_sum)
         file_sentiment.update(file_sentences_sentiment_var)
         file_sentiment.update({"sentiment_text": file_sentences_text})
         file_sentiment.update({"sentiment_entities": file_entities})
-        
+
         return pd.Series(file_sentiment)
-    
+
     def parse_metadata(self, file):
         file_keys = list(file.keys())
 
@@ -1099,10 +1120,10 @@ class MetaDataParser(object):
             label_annotations = file['labelAnnotations']
             file_top_score = [x['score'] for x in label_annotations]
             pick_value = int(len(label_annotations) * 0.3)
-            if pick_value == 0: pick_value = 1 
+            if pick_value == 0: pick_value = 1
             file_top_score_pick = [x['score'] for x in label_annotations[:pick_value]]
-            file_top_desc = [x['description'] for x in label_annotations]       
-            file_top_desc_pick = [x['description'] for x in label_annotations[:pick_value]]   
+            file_top_desc = [x['description'] for x in label_annotations]
+            file_top_desc_pick = [x['description'] for x in label_annotations[:pick_value]]
             dog_cat_scores = []
             dog_cat_topics = []
             is_dog_or_cat = []
@@ -1110,9 +1131,9 @@ class MetaDataParser(object):
                 if label['description'] == 'dog' or label['description'] == 'cat':
                     dog_cat_scores.append(label['score'])
                     dog_cat_topics.append(label['topicality'])
-                    is_dog_or_cat.append(1)  
+                    is_dog_or_cat.append(1)
                 else:
-                    is_dog_or_cat.append(0) 
+                    is_dog_or_cat.append(0)
         else:
             file_top_score = []
             file_top_desc = []
@@ -1121,17 +1142,17 @@ class MetaDataParser(object):
             is_dog_or_cat = []
             file_top_score_pick = []
             file_top_desc_pick = []
-            
+
         if 'faceAnnotations' in file_keys:
             file_face = file['faceAnnotations']
             n_faces = len(file_face)
         else:
             n_faces = 0
-        
+
         if 'textAnnotations' in file_keys:
             text_annotations = file['textAnnotations']
             file_n_text_annotations = len(text_annotations)
-            file_len_text = [len(text['description']) for text in text_annotations]                
+            file_len_text = [len(text['description']) for text in text_annotations]
         else:
             file_n_text_annotations = 0
             file_len_text = []
@@ -1182,7 +1203,7 @@ class MetaDataParser(object):
         metadata.update({"label_score_first": file_top_score[0] if len(file_top_score)>0 else -1})
 
         return pd.Series(metadata)
-    
+
     def _transform(self, path, sentiment=True):
         file = self.open_json_file(path)
         if sentiment:
@@ -1190,7 +1211,7 @@ class MetaDataParser(object):
         else:
             result = self.parse_metadata(file)
         return result
-    
+
 def pretrained_w2v(train_text, model, name):
     train_corpus = [text_to_word_sequence(text) for text in train_text]
 
@@ -1231,12 +1252,12 @@ def pretrained_w2v(train_text, model, name):
     w2v_cols = ["{}{}".format(name, i) for i in range(1, model.vector_size+1)]
     result = pd.DataFrame(result)
     result.columns = w2v_cols
-    
+
     return result
 
 def w2v_pymagnitude(train_text, model, name):
     train_corpus = [text_to_word_sequence(text) for text in train_text]
-    
+
     result = []
     for text in train_corpus:
         vec = np.zeros(model.dim)
@@ -1265,24 +1286,24 @@ def w2v_pymagnitude(train_text, model, name):
                 vec = vec + model.query(word_)
                 continue
             vec = vec + model.query(word)
-                
+
         vec = vec / (n_w + 1)
         result.append(vec)
 
     w2v_cols = ["{}_mag{}".format(name, i) for i in range(1, model.dim+1)]
     result = pd.DataFrame(result)
     result.columns = w2v_cols
-    
+
     return result
 
 def doc2vec(description_k, d2v_param):
     corpus = [TaggedDocument(words=analyzer_k(text), tags=[i]) for i, text in enumerate(description_k)]
     doc2vecs = Doc2Vec(
-        documents=corpus, dm=1, 
+        documents=corpus, dm=1,
         **d2v_param
     ) # dm == 1 -> dmpv, dm != 1 -> DBoW
     doc2vecs = np.array([doc2vecs.infer_vector(analyzer_k(text)) for text in description_k])
-    
+
     doc2vec_df = pd.DataFrame()
     doc2vec_df['d2v_mean'] = np.mean(doc2vecs, axis=1)
     doc2vec_df['d2v_sum'] = np.sum(doc2vecs, axis=1)
@@ -1290,7 +1311,7 @@ def doc2vec(description_k, d2v_param):
     doc2vec_df['d2v_min'] = np.min(doc2vecs, axis=1)
     doc2vec_df['d2v_median'] = np.median(doc2vecs, axis=1)
     doc2vec_df['d2v_var'] = np.var(doc2vecs, axis=1)
-    
+
     return doc2vec_df
 
 def resize_to_square(im):
@@ -1310,7 +1331,7 @@ def resize_to_square(im):
 def load_image(path):
     image = cv2.imread(path)
     new_image = resize_to_square(image)
-    return preprocess_input_dense(new_image), preprocess_input_incep(new_image)#, preprocess_input_nas(new_image)
+    return preprocess_input_dense(new_image), preprocess_input_incep(new_image)
 
 def get_age_feats(df):
     df["Age_year"] = (df["Age"] / 12).astype(np.int32)
@@ -1324,7 +1345,7 @@ def freq_encoding(df, freq_cols):
         count_df = df.groupby([c])['PetID'].count().reset_index()
         count_df.columns = [c, '{}_freq'.format(c)]
         df = df.merge(count_df, how='left', on=c)
-        
+
     return df
 
 def getSize(filename):
@@ -1333,8 +1354,8 @@ def getSize(filename):
 
 def getDimensions(filename):
     img_size = Image.open(filename).size
-    return img_size 
-    
+    return img_size
+
 # ===============
 # Model
 # ===============
@@ -1343,15 +1364,15 @@ def get_score(y_true, y_pred):
 
 def get_y():
     return pd.read_csv('../input/petfinder-adoption-prediction/train/train.csv', usecols=[target]).values.flatten()
-    
+
 def run_model(X_train, y_train, X_valid, y_valid, X_test,
             categorical_features,
-            predictors, maxvalue_dict, fold_id, params, model_name):
-    train = lgb.Dataset(X_train, y_train, 
-                        categorical_feature=categorical_features, 
+            predictors, fold_id, params, model_name):
+    train = lgb.Dataset(X_train, y_train,
+                        categorical_feature=categorical_features,
                         feature_name=predictors)
-    valid = lgb.Dataset(X_valid, y_valid, 
-                        categorical_feature=categorical_features, 
+    valid = lgb.Dataset(X_valid, y_valid,
+                        categorical_feature=categorical_features,
                         feature_name=predictors)
     evals_result = {}
     model = lgb.train(
@@ -1363,7 +1384,7 @@ def run_model(X_train, y_train, X_valid, y_valid, X_test,
         **FIT_PARAMS
     )
     logger.info(f'Best Iteration: {model.best_iteration}')
-    
+
     # train score
     y_pred_train = model.predict(X_train)
     train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
@@ -1386,14 +1407,60 @@ def run_model(X_train, y_train, X_valid, y_valid, X_test,
 
     return y_pred_valid, y_pred_test, train_rmse, valid_rmse
 
+
+def run_classifier_model(X_train, y_train, X_valid, y_valid, X_test,
+              categorical_features,
+              predictors, fold_id, params, model_name):
+    train = lgb.Dataset(X_train, y_train,
+                        categorical_feature=categorical_features,
+                        feature_name=predictors)
+    valid = lgb.Dataset(X_valid, y_valid,
+                        categorical_feature=categorical_features,
+                        feature_name=predictors)
+    evals_result = {}
+    model = lgb.train(
+        params,
+        train,
+        valid_sets=[valid],
+        valid_names=['valid'],
+        evals_result=evals_result,
+        **FIT_PARAMS
+    )
+    logger.info(f'Best Iteration: {model.best_iteration}')
+
+    # train score
+    y_pred_train = model.predict(X_train)
+    y_pred_train = np.sum(y_pred_train * np.array([0, 1, 2, 3, 4]), axis=1)
+    train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+
+    # validation score
+    y_pred_valid = model.predict(X_valid)
+    y_pred_valid = np.sum(y_pred_valid * np.array([0, 1, 2, 3, 4]), axis=1)
+    valid_rmse = np.sqrt(mean_squared_error(y_valid, y_pred_valid))
+    y_pred_valid = rankdata(y_pred_valid) / len(y_pred_valid)
+
+    # save model
+    model.save_model(f'{model_name}_fold{fold_id}.txt')
+
+    # predict test
+    y_pred_test = model.predict(X_test)
+    y_pred_test = np.sum(y_pred_test * np.array([0, 1, 2, 3, 4]), axis=1)
+    y_pred_test = rankdata(y_pred_test) / len(y_pred_test)
+
+    # save predictions
+    np.save(f'{model_name}_train_fold{fold_id}.npy', y_pred_valid)
+    np.save(f'{model_name}_test_fold{fold_id}.npy', y_pred_test)
+
+    return y_pred_valid, y_pred_test, train_rmse, valid_rmse
+
 def run_xgb_model(X_train, y_train, X_valid, y_valid, X_test,
-            predictors, maxvalue_dict, fold_id, params, model_name):
+            predictors, fold_id, params, model_name):
     d_train = xgb.DMatrix(data=X_train, label=y_train, feature_names=predictors)
     d_valid = xgb.DMatrix(data=X_valid, label=y_valid, feature_names=predictors)
-    
+
     watchlist = [(d_train, 'train'), (d_valid, 'valid')]
     model = xgb.train(dtrain=d_train, evals=watchlist, params=params, **FIT_PARAMS)
-    
+
     # train score
     y_pred_train = model.predict(d_train, ntree_limit=model.best_ntree_limit)
     train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
@@ -1415,7 +1482,7 @@ def run_xgb_model(X_train, y_train, X_valid, y_valid, X_test,
     np.save(f'{model_name}_test_fold{fold_id}.npy', y_pred_test)
 
     return y_pred_valid, y_pred_test, train_rmse, valid_rmse
- 
+
 def plot_mean_feature_importances(feature_importances, max_num=50, importance_type='gain', path=None):
     mean_gain = feature_importances[[importance_type, 'feature']].groupby('feature').mean()
     feature_importances['mean_' + importance_type] = feature_importances['feature'].map(mean_gain[importance_type])
@@ -1427,7 +1494,7 @@ def plot_mean_feature_importances(feature_importances, max_num=50, importance_ty
         sns.barplot(x=importance_type, y='feature', data=data)
         plt.tight_layout()
         plt.savefig(path)
-    
+
     return feature_importances
 
 def to_bins(x, borders):
@@ -1477,11 +1544,11 @@ class OptimizedRounder(object):
 
     def coefficients(self):
         return self.coef_['x']
-    
+
 class StratifiedGroupKFold():
     def __init__(self, n_splits=5):
         self.n_splits = n_splits
-    
+
     def split(self, X, y=None, groups=None):
         fold = pd.DataFrame([X, y, groups]).T
         fold.columns = ['X', 'y', 'groups']
@@ -1497,7 +1564,7 @@ class StratifiedGroupKFold():
             for i, (train_index, valid_index) in enumerate(cv.split(range(len(selected)), y=None, groups=selected['groups'])):
                 selected.loc[valid_index, 'fold_id'] = i
             fold.loc[mask, 'fold_id'] = selected['fold_id'].values
-            
+
         for i in range(self.n_splits):
             indices = np.arange(len(fold))
             train_index = indices[fold['fold_id'] != i]
@@ -1580,6 +1647,10 @@ class CyclicLR(Callback):
 
         K.set_value(self.model.optimizer.lr, self.clr())
 
+def se_block(input, channels, r=8):
+    x = Dense(channels//r, activation="relu")(input)
+    x = Dense(channels, activation="sigmoid")(x)
+    return Multiply()([input, x])
 
 def get_model(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.4, weight_decay=0.1):
     inp_cats = []
@@ -1629,6 +1700,12 @@ def get_model(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.4, weight_dec
     conc = Dropout(dout)(conc)
 
     x = concatenate([conc, x_img, nums, cats, inp_important_numerical])
+    x = se_block(x, 32 + 32 + 32 + 8 + len(important_numerical))
+    x = BatchNormalization()(x)
+    x = Dropout(dout)(x)
+    x = Dense(128, activation="relu")(x)
+    x = concatenate([x, inp_important_numerical])
+    x = BatchNormalization()(x)
     x = Dropout(dout / 2)(x)
 
     out = Dense(1, activation="linear")(x)
@@ -1694,7 +1771,7 @@ if __name__ == '__main__':
     init_logger()
     seed_everything(seed=seed)
     t_cols, k_cols, g_cols, add_t_cols = [], [], [], []
-    
+
     # load
     train = pd.read_csv('../input/petfinder-adoption-prediction/train/train.csv')
     test = pd.read_csv('../input/petfinder-adoption-prediction/test/test.csv')
@@ -1711,26 +1788,26 @@ if __name__ == '__main__':
     train.drop(["Breed1", "Breed2"], axis=1)
     train.rename(columns={"fix_Breed1": "Breed1", "fix_Breed2": "Breed2"})
     logger.info(f'DataFrame shape: {train.shape}')
-    
-    with timer('common features'): 
+
+    with timer('common features'):
         with timer('merge additional state files'):
             train = merge_state_info(train)
-            
+
         common_cols = list(train.columns)
-        
-        with timer('merge additional breed rating files'): 
+
+        with timer('merge additional breed rating files'):
             orig_cols = list(train.columns)
             train = merge_breed_name_sub(train)
             t_cols += [c for c in train.columns if c not in orig_cols]
             k_cols += [c for c in train.columns if c not in orig_cols]
-            
+
             orig_cols = list(train.columns)
             train = merge_breed_name(train)
             g_cols += [c for c in train.columns if c not in orig_cols and "_main_breed_all" in c] + ["Type_second_breed"]
-            
-        with timer('preprocess category features'): 
+
+        with timer('preprocess category features'):
             train = to_category(train, cat=categorical_features)
-            
+
         train[text_features].fillna('missing', inplace=True)
         with timer('preprocess metadata'): #使ってるcolsがkaeruさんとtakuokoで違う kaeruさんがfirst系は全部使うが、takuokoは使わない
             # TODO: parallelization
@@ -1755,33 +1832,33 @@ if __name__ == '__main__':
             g.columns = [c + '_' + stat for c in columns for stat in stats]
             train = train.merge(g, how='left', on='PetID')
             k_cols += [c for c in g.columns if ("mean_mean" in c or "mean_sum" in c or "first_first" in c) and "annots_score_normal" not in c] + \
-                        ['crop_conf_first', 'crop_x_first', 'crop_y_first', 'crop_importance_first', 'crop_conf_mean', 
+                        ['crop_conf_first', 'crop_x_first', 'crop_y_first', 'crop_importance_first', 'crop_conf_mean',
                        'crop_conf_sum', 'crop_importance_mean', 'crop_importance_sum']
             t_cols += [c for c in g.columns if ((re.match("\w*_sum_\w*(?<!sum)$", c) and "first" not in c) \
                        or ("sum" not in c and "first" not in c)) and "annots_score_pick" not in c]
             g_cols += [c for c in g.columns if "mean_mean" in c or "mean_sum" in c or "mean_var" in c and "annots_score_pick" not in c] + \
                         ['crop_conf_mean', 'crop_conf_sum', 'crop_conf_var', 'crop_importance_mean',
                        'crop_importance_sum', 'crop_importance_var']
-            
-        with timer('preprocess metatext'): 
+
+        with timer('preprocess metatext'):
             meta_features = meta_parser.metadata_files[['PetID', 'annots_top_desc', 'annots_top_desc_pick']]
             meta_features_all = meta_features.groupby('PetID')['annots_top_desc'].apply(lambda x: " ".join(x)).reset_index()
-            train = train.merge(meta_features_all, how='left', on='PetID') 
-            
+            train = train.merge(meta_features_all, how='left', on='PetID')
+
             meta_features_pick = meta_features.groupby('PetID')['annots_top_desc_pick'].apply(lambda x: " ".join(x)).reset_index()
-            train = train.merge(meta_features_pick, how='left', on='PetID') 
+            train = train.merge(meta_features_pick, how='left', on='PetID')
 
             sentiment_features = meta_parser.sentiment_files[['PetID', 'sentiment_text', 'sentiment_entities']]
             sentiment_features_txt = sentiment_features.groupby('PetID')['sentiment_text'].apply(lambda x: " ".join(x)).reset_index()
-            train = train.merge(sentiment_features_txt, how='left', on='PetID') 
-            
+            train = train.merge(sentiment_features_txt, how='left', on='PetID')
+
             sentiment_features_entities = sentiment_features.groupby('PetID')['sentiment_entities'].apply(lambda x: " ".join(x)).reset_index()
-            train = train.merge(sentiment_features_entities, how='left', on='PetID') 
+            train = train.merge(sentiment_features_entities, how='left', on='PetID')
 
             train[meta_text] = train[meta_text].astype(str)
             train[meta_text].fillna("missing", inplace=True)
             del meta_features_all, meta_features_pick, meta_features, sentiment_features; gc.collect()
-            
+
         with timer('make image features'):
                 train_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/train_images/*.jpg'))
                 test_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/test_images/*.jpg'))
@@ -1824,22 +1901,12 @@ if __name__ == '__main__':
                 backbone2 = InceptionResNetV2(input_tensor=inp2,
                                               weights='../input/petfinderdatasets/inception_resnet_v2_weights_tf_dim_ordering_tf_kernels_notop.h5',
                                               include_top=False)
-                """x2 = backbone2.output
+                x2 = backbone2.output
                 x2 = GlobalAveragePooling2D()(x2)
                 x2 = Lambda(lambda x: K.expand_dims(x, axis=-1))(x2)
                 x2 = AveragePooling1D(4)(x2)
                 out2 = Lambda(lambda x: x[:, :, 0])(x2)
                 model_inception = Model(inp2, out2)
-
-                inp3 = Input((256, 256, 3))
-                backbone3 = NASNetMobile(input_tensor=inp3,
-                                         include_top=False,
-                                         pooling='avg',
-                                         weights=None)
-                x = Dropout(0.75)(backbone3.output)
-                x = Dense(10, activation='softmax')(x)
-                model_nasnet = Model(backbone3.input, x)
-                model_nasnet.load_weights('../input/copy-of-titu1994neuralimageassessment/nasnet_weights.h5')"""
 
                 features_dense = []
                 features_inception = []
@@ -1851,20 +1918,16 @@ if __name__ == '__main__':
                     batch_path = img_pathes[start: end]
                     batch_images_dense = np.zeros((len(batch_pets), img_size, img_size, 3))
                     batch_images_incep = np.zeros((len(batch_pets), img_size, img_size, 3))
-                    #batch_images_nas = np.zeros((len(batch_pets), img_size, img_size, 3))
                     for i, (pet_id, path) in enumerate(zip(batch_pets, batch_path)):
                         try:
-                            #batch_images_dense[i], batch_images_incep[i], batch_images_nas[i] = load_image(path)
                             batch_images_dense[i], batch_images_incep[i] = load_image(path)
                         except:
                             pass
                     batch_preds_dense = model_dense.predict(batch_images_dense)
                     batch_preds_inception = model_inception.predict(batch_images_incep)
-                    #batch_preds_nasnet = model_nasnet.predict(batch_images_nas)
                     for i, pet_id in enumerate(batch_pets):
                         features_dense.append([pet_id] + list(batch_preds_dense[i]))
                         features_inception.append([pet_id] + list(batch_preds_inception[i]))
-                        #features_nasnet.append([pet_id] + list(batch_preds_nasnet[i]))
 
                 X = pd.DataFrame(features_dense, columns=["PetID"] + ["dense121_2_{}".format(i) for i in
                                                                       range(batch_preds_dense.shape[1])])
@@ -1872,8 +1935,8 @@ if __name__ == '__main__':
                 train = pd.merge(train, gp_img, how="left", on="PetID")
                 gp_dense_first = X.groupby("PetID").first().reset_index()
                 t_cols += list(gp_img.columns.drop("PetID"))
-                del model_dense, model_inception, X, gp_img;
-                gc.collect();
+                del model_dense, model_inception, X, gp_img
+                gc.collect()
                 K.clear_session()
 
                 X = pd.DataFrame(features_inception, columns=["PetID"] + ["inception_resnet_{}".format(i) for i in
@@ -1881,28 +1944,16 @@ if __name__ == '__main__':
                 gp_img = X.groupby("PetID").mean().reset_index()
                 train = pd.merge(train, gp_img, how="left", on="PetID")
                 t_cols += list(gp_img.columns.drop("PetID"))
-                del gp_img, X; gc.collect()
+                del gp_img, X
+                gc.collect()
 
-                """X = pd.DataFrame(features_nasnet, columns=["PetID"] + ["features_nasnet{}".format(i) for i in
-                                                                          range(batch_preds_nasnet.shape[1])])
-                gp_img = X.groupby("PetID").mean().reset_index()
-                train = pd.merge(train, gp_img, how="left", on="PetID")
-                t_cols += list(gp_img.columns.drop("PetID"))
-                add_t_cols += list(gp_img.columns.drop("PetID"))
-                del gp_img, X;
-                gc.collect()"""
-        
     if T_flag:
-        with timer('takuoko features'): 
+        with timer('takuoko features'):
             orig_cols = train.columns
-            with timer('merge emoji files'):   
+            with timer('merge emoji files'):
                 train = merge_emoji(train)
 
-            with timer('merge additional files'):
-                train = merge_muslim_info(train)
-                train = merge_characteristics(train)
-
-            with timer('preprocess and simple features'): 
+            with timer('preprocess and simple features'):
                 train = get_interactions(train)
 
             with timer('tfidf + svd / nmf / bm25'):
@@ -1925,7 +1976,7 @@ if __name__ == '__main__':
                 train = pd.concat([train, X], axis=1)
                 del vectorizer; gc.collect()
 
-            with timer('count + svd / nmf / bm25'):  
+            with timer('count + svd / nmf / bm25'):
                 vectorizer = make_pipeline(
                     CountVectorizer(),
                     make_union(
@@ -1945,7 +1996,7 @@ if __name__ == '__main__':
                 train = pd.concat([train, X], axis=1)
                 del vectorizer; gc.collect()
 
-            with timer('tfidf2 + svd / nmf / bm25'):  
+            with timer('tfidf2 + svd / nmf / bm25'):
                 vectorizer = make_pipeline(
                     TfidfVectorizer(min_df=2,  max_features=20000,
                         strip_accents='unicode', analyzer='word', token_pattern=r'\w{1,}',
@@ -1967,7 +2018,7 @@ if __name__ == '__main__':
                 train = pd.concat([train, X], axis=1)
                 del vectorizer; gc.collect()
 
-            with timer('count2 + svd / nmf / bm25'):  
+            with timer('count2 + svd / nmf / bm25'):
                 vectorizer = make_pipeline(
                     CountVectorizer(min_df=2,  max_features=20000,
                     strip_accents='unicode', analyzer='word', token_pattern=r'\w{1,}',
@@ -2033,14 +2084,14 @@ if __name__ == '__main__':
                 train = pd.concat([train, X], axis=1)
                 del vectorizer; gc.collect()
 
-            with timer('description fasttext'):  
+            with timer('description fasttext'):
                 embedding = '../input/quora-embedding/GoogleNews-vectors-negative300.bin'
                 model = KeyedVectors.load_word2vec_format(embedding, binary=True)
                 X = pretrained_w2v(train["Description_Emb"], model, name="gnvec")
                 train = pd.concat([train, X], axis=1)
                 del model; gc.collect()
 
-            with timer('description glove'):  
+            with timer('description glove'):
                 embedding = "../input/pymagnitude-data/glove.840B.300d.magnitude"
                 model = Magnitude(embedding)
                 X = w2v_pymagnitude(train["Description_Emb"], model, name="glove")
@@ -2050,8 +2101,8 @@ if __name__ == '__main__':
                 X_desc, embedding_matrix, embedding_dim, word_index = w2v_fornn(train["Description_Emb"], model,
                                                                                 max_len)
                 del model; gc.collect()
-                
-            with timer('meta text bow/tfidf->svd / nmf / bm25'): 
+
+            with timer('meta text bow/tfidf->svd / nmf / bm25'):
                 train['desc'] = ''
                 for c in ['BreedName_main_breed', 'BreedName_second_breed', 'annots_top_desc', 'sentiment_text']:
                     train['desc'] += ' ' + train[c].astype(str)
@@ -2094,8 +2145,8 @@ if __name__ == '__main__':
                                 + ['meta_desc_count_bm25_{}'.format(i) for i in range(n_components)])
                 train = pd.concat([train, X], axis=1)
                 train.drop(['desc'], axis=1, inplace=True)
-                
-            with timer('image features'): 
+
+            with timer('image features'):
                 train['num_images'] = train['PetID'].apply(lambda x: sum(train_images.PetID == x))
                 train['num_images_per_pet'] = train['num_images'] / train['Quantity']
 
@@ -2103,81 +2154,81 @@ if __name__ == '__main__':
                 stats = ['mean', 'sum', 'median', 'min', 'max', 'var']
                 groupby_dict = [
                     {
-                        'key': ['Name'], 
-                        'var': ['Age'], 
+                        'key': ['Name'],
+                        'var': ['Age'],
                         'agg': ['count']
                     },
                     {
-                        'key': ['RescuerID'], 
-                        'var': ['Age'], 
+                        'key': ['RescuerID'],
+                        'var': ['Age'],
                         'agg': ['count']
                     },
                     {
-                        'key': ['RescuerID', 'State'], 
-                        'var': ['Age'], 
+                        'key': ['RescuerID', 'State'],
+                        'var': ['Age'],
                         'agg': ['count']
                     },
                     {
-                        'key': ['RescuerID', 'Type'], 
-                        'var': ['Age'], 
+                        'key': ['RescuerID', 'Type'],
+                        'var': ['Age'],
                         'agg': ['count']
                     },
                     {
-                        'key': ['RescuerID'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'key': ['RescuerID'],
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'],
                         'agg': stats
                     },
                     {
-                        'key': ['RescuerID', 'State'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'key': ['RescuerID', 'State'],
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'],
                         'agg': stats
                     },
                     {
-                        'key': ['RescuerID', 'Type'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'key': ['RescuerID', 'Type'],
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'],
                         'agg': stats
                     },
                     {
-                        'key': ['Type', 'Breed1', 'Breed2'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'key': ['Type', 'Breed1', 'Breed2'],
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'],
                         'agg': stats
                     },
                     {
-                        'key': ['Type', 'Breed1'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'key': ['Type', 'Breed1'],
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'],
                         'agg': stats
                     },
                     {
-                        'key': ['State'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'key': ['State'],
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'],
                         'agg': stats
                     },
                     {
-                        'key': ['MaturitySize'], 
-                        'var': ['Age', 'Quantity', 'Sterilized', 'Fee'], 
+                        'key': ['MaturitySize'],
+                        'var': ['Age', 'Quantity', 'Sterilized', 'Fee'],
                         'agg': stats
                     },
                 ]
 
                 nunique_dict = [
                     {
-                        'key': ['State'], 
-                        'var': ['RescuerID'], 
+                        'key': ['State'],
+                        'var': ['RescuerID'],
                         'agg': ['nunique']
                     },
                     {
-                        'key': ['Dewormed'], 
-                        'var': ['RescuerID'], 
+                        'key': ['Dewormed'],
+                        'var': ['RescuerID'],
                         'agg': ['nunique']
                     },
                     {
-                        'key': ['Type'], 
-                        'var': ['RescuerID'], 
+                        'key': ['Type'],
+                        'var': ['RescuerID'],
                         'agg': ['nunique']
                     },
                     {
-                        'key': ['Type', 'Breed1'], 
-                        'var': ['RescuerID'], 
+                        'key': ['Type', 'Breed1'],
+                        'var': ['RescuerID'],
                         'agg': ['nunique']
                     },
                 ]
@@ -2197,32 +2248,32 @@ if __name__ == '__main__':
                 for c in categorical_features:
                     train[c] = train[c].fillna(train[c].max() + 1)
 
-                cv = CategoryVectorizer(categorical_features, n_components, 
-                         vectorizer=CountVectorizer(), 
+                cv = CategoryVectorizer(categorical_features, n_components,
+                         vectorizer=CountVectorizer(),
                          transformer=LatentDirichletAllocation(n_components=n_components, n_jobs=-1, learning_method='online', random_state=777),
                          name='CountLDA')
                 features1 = cv.transform(train).astype(np.float32)
 
-                cv = CategoryVectorizer(categorical_features, n_components, 
-                         vectorizer=CountVectorizer(), 
+                cv = CategoryVectorizer(categorical_features, n_components,
+                         vectorizer=CountVectorizer(),
                          transformer=TruncatedSVD(n_components=n_components, random_state=777),
                          name='CountSVD')
                 features2 = cv.transform(train).astype(np.float32)
                 train = pd.concat([train, features1, features2], axis=1)
 
             t_cols += [c for c in train.columns if c not in orig_cols]
-        
+
     if K_flag or G_flag:
         with timer('kaeru and gege features'):
-            with timer('text stats features'): 
+            with timer('text stats features'):
                 train = get_text_features(train)
             k_cols += ['Length_Description', 'Length_annots_top_desc', 'Lengths_sentiment_text']
             g_cols += ['Length_Description', 'Length_annots_top_desc', 'Lengths_sentiment_entities']
-        
+
     if K_flag:
-        with timer('kaeru features'): 
+        with timer('kaeru features'):
             orig_cols = train.columns
-            with timer('enginerring age'): 
+            with timer('enginerring age'):
                 train = get_age_feats(train)
 
             with timer('frequency encoding'):
@@ -2244,7 +2295,7 @@ if __name__ == '__main__':
                 train = pd.concat([train, X], axis=1)
                 del vectorizer; gc.collect()
 
-            with timer('description doc2vec'):  
+            with timer('description doc2vec'):
                 d2v_param = {
                     "features_num": 300,
                     "min_word_count": 10,
@@ -2294,18 +2345,18 @@ if __name__ == '__main__':
                     train[c+"_k"] = train[c]
                 groupby_dict = [
                     {
-                        'key': ['RescuerID'], 
-                        'var': ['Age_k'], 
+                        'key': ['RescuerID'],
+                        'var': ['Age_k'],
                         'agg': ['count']
                     },
                     {
-                        'key': ['RescuerID'], 
-                        'var': ['Age_k', 'Length_Description', 'Length_annots_top_desc', 'Lengths_sentiment_text'], 
+                        'key': ['RescuerID'],
+                        'var': ['Age_k', 'Length_Description', 'Length_annots_top_desc', 'Lengths_sentiment_text'],
                         'agg': stats + ["var"]
                     },
                     {
-                        'key': ['RescuerID'], 
-                        'var': ['MaturitySize_k', 'FurLength_k', 'Fee_k', 'Health_k'], 
+                        'key': ['RescuerID'],
+                        'var': ['MaturitySize_k', 'FurLength_k', 'Fee_k', 'Health_k'],
                         'agg': stats
                     }
                 ]
@@ -2315,9 +2366,9 @@ if __name__ == '__main__':
                 train.drop(var, axis=1, inplace=True)
 
             k_cols += [c for c in train.columns if c not in orig_cols if c not in kaeru_drop_cols]
-        
+
     if G_flag:
-        with timer('gege features'): 
+        with timer('gege features'):
             orig_cols = train.columns
             with timer('densenet features'):
                 vectorizer = TruncatedSVD(n_components=n_components_gege_img, random_state=kaeru_seed)
@@ -2386,12 +2437,16 @@ if __name__ == '__main__':
                 train = train.merge(gp.reset_index(), how="left", on="PetID")
 
             g_cols += [c for c in train.columns if c not in orig_cols]
-            
+
     dtype_cols = ['BreedName_main_breed', 'BreedName_second_breed', 'BreedName_main_breed_all']
     train[dtype_cols] = train[dtype_cols].astype("int32")
-        
+    not_use_cols = list(set(t_cols) - set(use_cols))
+    train.drop(not_use_cols, axis=1, inplace=True)
+    train = reduce_mem_usage(train)
+    gc.collect()
+
     logger.info(train.head())
-    
+
     train.to_feather("all_data.feather")
     np.save("common_cols.npy", np.array(common_cols))
     np.save("t_cols.npy", np.array(t_cols))
@@ -2405,7 +2460,7 @@ if __name__ == '__main__':
             predictors = [c for c in predictors if c in use_cols] + add_t_cols
             categorical_features_t = [c for c in categorical_features_t if c in predictors]
             logger.info(f'predictors / use_cols = {len(predictors)} / {len(use_cols)}')
-            
+
             train = train.loc[:, ~train.columns.duplicated()]
 
             X = train.loc[:, predictors]
@@ -2417,31 +2472,59 @@ if __name__ == '__main__':
             X.to_feather("X_train_t.feather")
             X_test.reset_index(drop=True).to_feather("X_test_t.feather")
 
-        with timer('takuoko lgbm modeling'):
-            y_pred_t = np.empty(len_train,)
-            y_test_t = []
+        with timer('takuoko lgbm regression modeling'):
+            y_pred_reg_t = np.empty(len_train,)
+            y_test_reg_t = []
             train_losses, valid_losses = [], []
 
             cv = StratifiedGroupKFold(n_splits=n_splits)
-            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)): 
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
                 X_train = X.loc[train_index, :]
                 X_valid = X.loc[valid_index, :]
                 y_train = y[train_index]
                 y_valid = y[valid_index]
 
                 pred_val, pred_test, train_rmse, valid_rmse = run_model(X_train, y_train, X_valid, y_valid, X_test,
-                                 categorical_features_t, predictors, maxvalue_dict, fold_id, MODEL_PARAMS, MODEL_NAME+"_t")
-                y_pred_t[valid_index] = pred_val 
-                y_test_t.append(pred_test)
+                                 categorical_features_t, predictors, fold_id, MODEL_PARAMS, MODEL_NAME+"_t_reg")
+                y_pred_reg_t[valid_index] = pred_val
+                y_test_reg_t.append(pred_test)
                 train_losses.append(train_rmse)
                 valid_losses.append(valid_rmse)
 
-            y_test_t = np.mean(y_test_t, axis=0)
+            y_test_reg_t = np.mean(y_test_reg_t, axis=0)
             logger.info(f'train RMSE = {np.mean(train_losses)}')
             logger.info(f'valid RMSE = {np.mean(valid_losses)}')
-                                    
-        np.save("y_test_t.npy",y_test_t)
-        np.save("y_oof_t.npy", y_pred_t)
+
+        np.save("y_test_reg_t.npy",y_test_reg_t)
+        np.save("y_oof_reg_t.npy", y_pred_reg_t)
+
+        with timer('takuoko lgbm classification modeling'):
+            y_pred_class_t = np.empty(len_train, )
+            y_test_class_t = []
+            train_losses, valid_losses = [], []
+
+            cv = StratifiedGroupKFold(n_splits=n_splits)
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
+                X_train = X.loc[train_index, :]
+                X_valid = X.loc[valid_index, :]
+                y_train = y[train_index]
+                y_valid = y[valid_index]
+
+                pred_val, pred_test, train_rmse, valid_rmse = run_classifier_model(X_train, y_train, X_valid, y_valid,
+                                                                        X_test, categorical_features_t, predictors,
+                                                                        fold_id, MODEL_PARAMS_CLASSIFIER,
+                                                                        MODEL_NAME + "_t_class")
+                y_pred_class_t[valid_index] = pred_val
+                y_test_class_t.append(pred_test)
+                train_losses.append(train_rmse)
+                valid_losses.append(valid_rmse)
+
+            y_test_class_t = np.mean(y_test_class_t, axis=0)
+            logger.info(f'train RMSE = {np.mean(train_losses)}')
+            logger.info(f'valid RMSE = {np.mean(valid_losses)}')
+
+        np.save("y_test_class_t.npy", y_test_class_t)
+        np.save("y_oof_class_t.npy", y_pred_class_t)
 
         with timer('takuoko feature info for NN'):
             img_cols = [c for c in t_cols if "dense" in c or "inception" in c]
@@ -2501,13 +2584,16 @@ if __name__ == '__main__':
                 train_losses.append(train_rmse)
                 valid_losses.append(valid_rmse)
 
+                del model
+                K.clear_session()
+
             y_test_t_nn = np.mean(y_test_t_nn, axis=0)
             logger.info(f'train RMSE = {np.mean(train_losses)}')
             logger.info(f'valid RMSE = {np.mean(valid_losses)}')
 
         np.save("y_test_t_nn.npy", y_test_t_nn)
         np.save("y_oof_t_nn.npy", y_pred_t_nn)
-    
+
     if K_flag:
         with timer('kaeru feature info'):
             kaeru_cat_cols = None
@@ -2535,8 +2621,8 @@ if __name__ == '__main__':
                 y_valid = y[valid_index]
 
                 pred_val, pred_test, train_rmse, valid_rmse = run_model(X_train, y_train, X_valid, y_valid, X_test,
-                                 kaeru_cat_cols, predictors, maxvalue_dict, fold_id, KAERU_PARAMS, MODEL_NAME+"_k")
-                y_pred_k[valid_index] = pred_val 
+                                 kaeru_cat_cols, predictors, fold_id, KAERU_PARAMS, MODEL_NAME+"_k")
+                y_pred_k[valid_index] = pred_val
                 y_test_k.append(pred_test)
                 train_losses.append(train_rmse)
                 valid_losses.append(valid_rmse)
@@ -2547,7 +2633,7 @@ if __name__ == '__main__':
 
         np.save("y_test_k.npy",y_test_k)
         np.save("y_oof_k.npy", y_pred_k)
-        
+
     if G_flag:
         with timer('gege feature info'):
             predictors = list(set(common_cols+g_cols) - set([target] + remove+gege_drop_cols))
@@ -2561,19 +2647,19 @@ if __name__ == '__main__':
             y = y[:len_train]
             X.to_feather("X_train_g.feather")
             X_test.reset_index(drop=True).to_feather("X_test_g.feather")
-            
+
         with timer('gege adversarial validation'):
             train_idx = range(0, len_train)
             X_adv = train.loc[:, predictors]
             y_adv = np.array([0 for i in range(len(X))] + [1 for i in range(len(X_test))])
-            
+
             X_adv_tr, X_adv_tst, y_adv_tr, y_adv_tst = train_test_split(X_adv,y_adv, test_size=0.20, shuffle = True, random_state = 42)
-            
+
             lgtrain = lgb.Dataset(X_adv_tr, y_adv_tr,
-                                  categorical_feature=categorical_features_g, 
+                                  categorical_feature=categorical_features_g,
                                   feature_name=predictors)
             lgvalid = lgb.Dataset(X_adv_tst, y_adv_tst,
-                                  categorical_feature=categorical_features_g, 
+                                  categorical_feature=categorical_features_g,
                                   feature_name=predictors)
 
             lgb_adv = lgb.train(
@@ -2600,16 +2686,16 @@ if __name__ == '__main__':
             train_losses, valid_losses = [], []
 
             cv = StratifiedGroupKFold(n_splits=n_splits)
-            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)): 
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
                 X_train = X.loc[train_index, :]
                 X_valid = X.loc[valid_index, :]
                 y_train = y[train_index]
                 y_valid = y[valid_index]
 
                 pred_val, pred_test, train_rmse, valid_rmse = run_xgb_model(X_train, y_train,
-                                                                            X_valid, y_valid, X_test, predictors, maxvalue_dict, 
+                                                                            X_valid, y_valid, X_test, predictors,
                                                                             fold_id, MODEL_PARAMS_XGB, MODEL_NAME+"_g")
-                y_pred_g[valid_index] = pred_val 
+                y_pred_g[valid_index] = pred_val
                 y_test_g.append(pred_test)
                 train_losses.append(train_rmse)
                 valid_losses.append(valid_rmse)
@@ -2621,10 +2707,11 @@ if __name__ == '__main__':
         np.save("y_test_g.npy",y_test_g)
         np.save("y_oof_g.npy", y_pred_g)
         np.save("extract_idx.npy", extract_idx)
-    
+
     if T_flag and K_flag and G_flag:
-        y_pred = ((y_pred_t[extract_idx]+y_pred_t_nn[extract_idx])/2 + y_pred_k[extract_idx] + y_pred_g) / 3
-        y_test = ((y_test_t+y_test_t_nn)/2 + y_test_k + y_test_g) / 3
+        y_pred = ((y_pred_reg_t[extract_idx]+y_pred_class_t[extract_idx]+y_pred_t_nn[extract_idx])/3
+                  + y_pred_k[extract_idx] + y_pred_g) / 3
+        y_test = ((y_test_reg_t+y_test_class_t+y_test_t_nn)/3 + y_test_k + y_test_g) / 3
     elif T_flag and K_flag:
         y_pred = y_pred_t*0.5 + y_pred_k*0.5
         y_test = y_test_t*0.5 + y_test_k*0.5
@@ -2643,7 +2730,7 @@ if __name__ == '__main__':
     elif G_flag:
         y_pred = y_pred_g
         y_test = y_test_g
-    
+
     with timer('optimize threshold'):
         optR = OptimizedRounder()
         optR.fit(y_pred, y)
@@ -2653,8 +2740,7 @@ if __name__ == '__main__':
         logger.info(f'Coefficients = {coefficients}')
         logger.info(f'QWK = {score}')
         y_test = optR.predict(y_test, coefficients).astype(int)
-        
+
     with timer('postprocess'):
         submission_with_postprocess(y_test)
     # submission(y_test)
-    
