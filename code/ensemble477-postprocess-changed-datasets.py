@@ -40,6 +40,8 @@ from keras.applications.densenet import preprocess_input as preprocess_input_den
 from keras.applications.densenet import DenseNet121
 from keras.applications.inception_resnet_v2 import preprocess_input as preprocess_input_incep
 from keras.applications.inception_resnet_v2 import InceptionResNetV2
+from keras.applications.nasnet import preprocess_input as preprocess_input_nas
+from keras.applications.nasnet import NASNetMobile
 from keras.layers import GlobalAveragePooling2D, Input, Lambda, AveragePooling1D
 from keras.models import Model
 from keras.preprocessing.text import text_to_word_sequence
@@ -1266,7 +1268,7 @@ def resize_to_square(im):
 def load_image(path):
     image = cv2.imread(path)
     new_image = resize_to_square(image)
-    return preprocess_input_dense(new_image), preprocess_input_incep(new_image)
+    return preprocess_input_dense(new_image), preprocess_input_incep(new_image), preprocess_input_nas(new_image)
 
 def get_age_feats(df):
     df["Age_year"] = (df["Age"] / 12).astype(np.int32)
@@ -1649,7 +1651,7 @@ def w2v_fornn(train_text, model, max_len):
 if __name__ == '__main__':
     init_logger()
     seed_everything(seed=seed)
-    t_cols, k_cols, g_cols = [], [], []
+    t_cols, k_cols, g_cols, add_t_cols = [], [], [], []
     
     # load
     train = pd.read_csv('../input/petfinder-adoption-prediction/train/train.csv')
@@ -1787,8 +1789,19 @@ if __name__ == '__main__':
                 out2 = Lambda(lambda x: x[:, :, 0])(x2)
                 model_inception = Model(inp2, out2)
 
+                inp3 = Input((256, 256, 3))
+                backbone3 = NASNetMobile(input_tensor=inp3,
+                                         include_top=False,
+                                         pooling='avg',
+                                         weights=None)
+                x = Dropout(0.75)(backbone3.output)
+                x = Dense(10, activation='softmax')(x)
+                model_nasnet = Model(backbone3.input, x)
+                model_nasnet.load_weights('../input/copy-of-titu1994neuralimageassessment/nasnet_weights.h5')
+
                 features_dense = []
                 features_inception = []
+                features_nasnet = []
                 for b in range(n_batches):
                     start = b * batch_size
                     end = (b + 1) * batch_size
@@ -1796,16 +1809,19 @@ if __name__ == '__main__':
                     batch_path = img_pathes[start: end]
                     batch_images_dense = np.zeros((len(batch_pets), img_size, img_size, 3))
                     batch_images_incep = np.zeros((len(batch_pets), img_size, img_size, 3))
+                    batch_images_nas = np.zeros((len(batch_pets), img_size, img_size, 3))
                     for i, (pet_id, path) in enumerate(zip(batch_pets, batch_path)):
                         try:
-                            batch_images_dense[i], batch_images_incep[i] = load_image(path)
+                            batch_images_dense[i], batch_images_incep[i], batch_images_nas[i] = load_image(path)
                         except:
                             pass
                     batch_preds_dense = model_dense.predict(batch_images_dense)
                     batch_preds_inception = model_inception.predict(batch_images_incep)
+                    batch_preds_nasnet = model_nasnet.predict(batch_images_nas)
                     for i, pet_id in enumerate(batch_pets):
                         features_dense.append([pet_id] + list(batch_preds_dense[i]))
                         features_inception.append([pet_id] + list(batch_preds_inception[i]))
+                        features_nasnet.append([pet_id] + list(batch_preds_nasnet[i]))
 
                 X = pd.DataFrame(features_dense, columns=["PetID"] + ["dense121_2_{}".format(i) for i in
                                                                       range(batch_preds_dense.shape[1])])
@@ -1822,6 +1838,14 @@ if __name__ == '__main__':
                 gp_img = X.groupby("PetID").mean().reset_index()
                 train = pd.merge(train, gp_img, how="left", on="PetID")
                 t_cols += list(gp_img.columns.drop("PetID"))
+                del gp_img, X; gc.collect()
+
+                X = pd.DataFrame(features_inception, columns=["PetID"] + ["features_nasnet{}".format(i) for i in
+                                                                          range(batch_preds_nasnet.shape[1])])
+                gp_img = X.groupby("PetID").mean().reset_index()
+                train = pd.merge(train, gp_img, how="left", on="PetID")
+                t_cols += list(gp_img.columns.drop("PetID"))
+                add_t_cols += list(gp_img.columns.drop("PetID"))
                 del gp_img, X;
                 gc.collect()
         
@@ -2331,7 +2355,7 @@ if __name__ == '__main__':
         with timer('takuoko feature info'):
             categorical_features_t = list(set(categorical_features) - set(remove))
             predictors = list(set(common_cols+t_cols+categorical_features_t) - set([target] + remove))
-            predictors = [c for c in predictors if c in use_cols]
+            predictors = [c for c in predictors if c in use_cols] + add_t_cols
             categorical_features_t = [c for c in categorical_features_t if c in predictors]
             logger.info(f'predictors / use_cols = {len(predictors)} / {len(use_cols)}')
             
