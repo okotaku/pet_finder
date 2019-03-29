@@ -132,7 +132,7 @@ MODEL_PARAMS_CLASSIFIER = {
     'num_leaves': 63,
     'subsample': 0.9,
     'subsample_freq': 1,
-    #'colsample_bytree': 0.6,
+    'colsample_bytree': 0.6,
     'max_depth': 9,
     'max_bin': 127,
     'reg_alpha': 0.11,
@@ -144,25 +144,46 @@ MODEL_PARAMS_CLASSIFIER = {
     'bin_construct_sample_cnt': 5000,
     'cat_l2': 10,
     'verbose': -1,
-    'nthread': 16,
+    'nthread': -1,
     'seed': 777,
 }
-KAERU_PARAMS = {'application': 'regression',
-          'boosting': 'gbdt',
-          'metric': 'rmse',
-          'num_leaves': 70,
-          'max_depth': 9,
-          'learning_rate': 0.01,
-          'max_bin': 32,
-          'bagging_freq': 2,
-          'bagging_fraction': 0.85,
-          'feature_fraction': 0.8,
-          'min_split_gain': 0.02,
-          'min_child_samples': 150,
-          'min_child_weight': 0.02,
-          'lambda_l2': 0.0475,
-          'verbosity': -1,
-          'seed': kaeru_seed}
+KAERU_PARAMS = {
+    'application': 'regression',
+    'boosting': 'gbdt',
+    'metric': 'rmse',
+    'num_leaves': 70,
+    'max_depth': 9,
+    'learning_rate': 0.01,
+    'max_bin': 32,
+    'bagging_freq': 2,
+    'bagging_fraction': 0.85,
+    'feature_fraction': 0.8,
+    'min_split_gain': 0.02,
+    'min_child_samples': 150,
+    'min_child_weight': 0.02,
+    'lambda_l2': 0.0475,
+    'verbosity': -1,
+    'seed': kaeru_seed
+}
+KAERU_PARAMS_CLASSIFIER = {
+    'application': 'multiclass',
+    'boosting': 'gbdt',
+    'num_class': 5,
+    'metric': 'multi_logloss',
+    'num_leaves': 70,
+    'max_depth': 9,
+    'learning_rate': 0.01,
+    'max_bin': 32,
+    'bagging_freq': 2,
+    'bagging_fraction': 0.85,
+    'feature_fraction': 0.8,
+    'min_split_gain': 0.02,
+    'min_child_samples': 150,
+    'min_child_weight': 0.02,
+    'lambda_l2': 0.0475,
+    'verbosity': -1,
+    'seed': kaeru_seed
+}
 ADV_PARAMS = {
     'task': 'train',
     'boosting_type': 'gbdt',
@@ -811,7 +832,6 @@ def reduce_mem_usage(df):
     """
     start_mem = df.memory_usage().sum() / 1024 ** 2
     logger.info('Memory usage of dataframe is {:.2f} MB'.format(start_mem))
-    logger.infot("column = ", len(df.columns))
     for i, col in enumerate(df.columns):
         try:
             col_type = df[col].dtype
@@ -2440,10 +2460,6 @@ if __name__ == '__main__':
 
     dtype_cols = ['BreedName_main_breed', 'BreedName_second_breed', 'BreedName_main_breed_all']
     train[dtype_cols] = train[dtype_cols].astype("int32")
-    not_use_cols = list(set(t_cols) - set(use_cols))
-    train.drop(not_use_cols, axis=1, inplace=True)
-    train = reduce_mem_usage(train)
-    gc.collect()
 
     logger.info(train.head())
 
@@ -2498,33 +2514,6 @@ if __name__ == '__main__':
         np.save("y_test_reg_t.npy",y_test_reg_t)
         np.save("y_oof_reg_t.npy", y_pred_reg_t)
 
-        with timer('takuoko lgbm classification modeling'):
-            y_pred_class_t = np.empty(len_train, )
-            y_test_class_t = []
-            train_losses, valid_losses = [], []
-
-            cv = StratifiedGroupKFold(n_splits=n_splits)
-            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
-                X_train = X.loc[train_index, :]
-                X_valid = X.loc[valid_index, :]
-                y_train = y[train_index]
-                y_valid = y[valid_index]
-
-                pred_val, pred_test, train_rmse, valid_rmse = run_classifier_model(X_train, y_train, X_valid, y_valid,
-                                                                        X_test, categorical_features_t, predictors,
-                                                                        fold_id, MODEL_PARAMS_CLASSIFIER,
-                                                                        MODEL_NAME + "_t_class")
-                y_pred_class_t[valid_index] = pred_val
-                y_test_class_t.append(pred_test)
-                train_losses.append(train_rmse)
-                valid_losses.append(valid_rmse)
-
-            y_test_class_t = np.mean(y_test_class_t, axis=0)
-            logger.info(f'train RMSE = {np.mean(train_losses)}')
-            logger.info(f'valid RMSE = {np.mean(valid_losses)}')
-
-        np.save("y_test_class_t.npy", y_test_class_t)
-        np.save("y_oof_class_t.npy", y_pred_class_t)
 
         with timer('takuoko feature info for NN'):
             img_cols = [c for c in t_cols if "dense" in c or "inception" in c]
@@ -2608,7 +2597,7 @@ if __name__ == '__main__':
             X.to_feather("X_train_k.feather")
             X_test.reset_index(drop=True).to_feather("X_test_k.feather")
 
-        with timer('kaeru modeling'):
+        with timer('kaeru lgbm regression modeling'):
             y_pred_k = np.empty(len_train,)
             y_test_k = []
             train_losses, valid_losses = [], []
@@ -2631,8 +2620,37 @@ if __name__ == '__main__':
             logger.info(f'train RMSE = {np.mean(train_losses)}')
             logger.info(f'valid RMSE = {np.mean(valid_losses)}')
 
-        np.save("y_test_k.npy",y_test_k)
+        np.save("y_test_k.npy", y_test_k)
         np.save("y_oof_k.npy", y_pred_k)
+
+        with timer('kaeru lgbm classification modeling'):
+            y_pred_class_k = np.empty(len_train, )
+            y_test_class_k = []
+            train_losses, valid_losses = [], []
+
+            cv = StratifiedGroupKFold(n_splits=n_splits)
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
+                X_train = X.loc[train_index, :]
+                X_valid = X.loc[valid_index, :]
+                y_train = y[train_index]
+                y_valid = y[valid_index]
+
+                pred_val, pred_test, train_rmse, valid_rmse = run_classifier_model(X_train, y_train, X_valid, y_valid,
+                                                                                   X_test, categorical_features_t,
+                                                                                   predictors,
+                                                                                   fold_id, KAERU_PARAMS_CLASSIFIER,
+                                                                                   MODEL_NAME + "_t_class")
+                y_pred_class_k[valid_index] = pred_val
+                y_test_class_k.append(pred_test)
+                train_losses.append(train_rmse)
+                valid_losses.append(valid_rmse)
+
+            y_test_class_k = np.mean(y_test_class_k, axis=0)
+            logger.info(f'train RMSE = {np.mean(train_losses)}')
+            logger.info(f'valid RMSE = {np.mean(valid_losses)}')
+
+        np.save("y_test_class_k.npy", y_test_class_k)
+        np.save("y_oof_class_k.npy", y_pred_class_k)
 
     if G_flag:
         with timer('gege feature info'):
@@ -2709,9 +2727,9 @@ if __name__ == '__main__':
         np.save("extract_idx.npy", extract_idx)
 
     if T_flag and K_flag and G_flag:
-        y_pred = ((y_pred_reg_t[extract_idx]+y_pred_class_t[extract_idx]+y_pred_t_nn[extract_idx])/3
-                  + y_pred_k[extract_idx] + y_pred_g) / 3
-        y_test = ((y_test_reg_t+y_test_class_t+y_test_t_nn)/3 + y_test_k + y_test_g) / 3
+        y_pred = ((y_pred_reg_t[extract_idx]+y_pred_t_nn[extract_idx])/2
+                  + (y_pred_k[extract_idx]+y_pred_class_k[extract_idx])/2 + y_pred_g) / 3
+        y_test = ((y_test_reg_t+y_test_t_nn)/2 + (y_test_k+y_test_class_k)/2 + y_test_g) / 3
     elif T_flag and K_flag:
         y_pred = y_pred_t*0.5 + y_pred_k*0.5
         y_test = y_test_t*0.5 + y_test_k*0.5

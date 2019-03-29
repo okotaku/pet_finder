@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 '''
-changed datasets
-added seed fix function
-added postprocess
+- fixed n_batches, see: https://www.kaggle.com/c/petfinder-adoption-prediction/discussion/86684
+- updated meta_perser
+- reordered process 
+- changed dtypes
+- add stacking
 '''
 import itertools
 import json
 import gc
 import glob
+import multiprocessing
+cpu_count = multiprocessing.cpu_count()
 import os
 import time
 import cv2
@@ -28,8 +32,10 @@ import tensorflow as tf
 import torch
 from scipy.stats import rankdata
 from PIL import Image
+from multiprocessing import Pool
 from pymagnitude import Magnitude
 from gensim.models import word2vec, KeyedVectors
+from gensim.models.fasttext import FastText
 from gensim.models.doc2vec import Doc2Vec, TaggedDocument
 from contextlib import contextmanager
 from itertools import combinations
@@ -42,14 +48,24 @@ from keras.applications.inception_resnet_v2 import InceptionResNetV2
 from keras.layers import GlobalAveragePooling2D, Input, Lambda, AveragePooling1D
 from keras.models import Model
 from keras.preprocessing.text import text_to_word_sequence
+from keras.callbacks import *
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing.sequence import pad_sequences
+from keras.engine.topology import Layer
+from keras import initializers, regularizers, constraints
+from keras.layers import Dense, Input, CuDNNLSTM, Embedding, Dropout, CuDNNGRU, Conv1D
+from keras.layers import Bidirectional, GlobalMaxPooling1D, concatenate, BatchNormalization, PReLU
+from keras.layers import Reshape, Flatten, Concatenate, SpatialDropout1D, GlobalAveragePooling1D, Multiply
 from sklearn.decomposition import LatentDirichletAllocation, TruncatedSVD, NMF
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.linear_model import Ridge
 from sklearn.metrics import cohen_kappa_score, mean_squared_error
 from sklearn.model_selection import GroupKFold, StratifiedKFold, train_test_split
 from sklearn.pipeline import make_pipeline, make_union
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 from sklearn.feature_extraction.text import _document_frequency
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 
 
 # ===============
@@ -84,6 +100,11 @@ n_components_gege_img = 32
 n_components_gege_txt = 16
 img_size = 256
 batch_size = 256
+batch_size_nn = 128
+
+# feature engineering NN
+max_len=128
+n_important = 100
 
 # model
 MODEL_PARAMS = {
@@ -256,8 +277,10 @@ gege_drop_cols = ['2017GDPperCapita', 'Breed1_equals_Breed2', 'Bumiputra', 'Chin
                    'dog_cat_topics_mean_var', 'is_dog_or_cat_mean_mean', 'is_dog_or_cat_mean_sum',
                   'is_dog_or_cat_mean_var', 'len_text_mean_mean', 'len_text_mean_sum', 'len_text_mean_var']
 use_cols = pd.read_csv("../input/pet-usecols/importance10.csv")
+#use_cols = pd.read_csv("importance4.csv")
 use_cols["gain"] = use_cols["gain"] / use_cols["gain"].sum()
-use_cols = list(use_cols[use_cols.gain>0.0002].feature.values)
+use_colsnn = list(use_cols[use_cols.gain>0.0002].feature.values)
+use_cols = list(use_cols.feature.values)[:1000]
 
 ps = nltk.stem.PorterStemmer()
 lc = nltk.stem.lancaster.LancasterStemmer()
@@ -317,7 +340,7 @@ def load_image_and_hash(paths):
 
         petids.append(imageid)
         hashes.append(np.array([f(image).hash for f in funcs]).reshape(256))
-    return petids, np.array(hashes).astype(np.int32)
+    return petids, np.array(hashes).astype(np.uint8)
     
 def find_duplicates_all():
     train_paths = glob.glob('../input/petfinder-adoption-prediction/train_images/*-1.jpg')
@@ -329,19 +352,23 @@ def find_duplicates_all():
     test_petids, test_hashes = load_image_and_hash(test_paths)
 
 #     sims = np.array([(train_hashes[i] == test_hashes).sum(axis=1)/256 for i in range(train_hashes.shape[0])])
-    train_hashes = torch.Tensor(train_hashes).cuda()
-    test_hashes = torch.Tensor(test_hashes).cuda()
-    sims = np.array([(train_hashes[i] == test_hashes).sum(dim=1).cpu().numpy()/256 for i in range(train_hashes.shape[0])])
+    try:
+        train_hashes = torch.from_numpy(train_hashes).cuda()
+        test_hashes = torch.from_numpy(test_hashes).cuda()
+    except:
+        train_hashes = torch.Tensor(train_hashes).cuda()
+        test_hashes = torch.Tensor(test_hashes).cuda()
+    sims = np.array([(train_hashes[i] == test_hashes).sum(dim=1).cpu().numpy() for i in range(train_hashes.shape[0])]) / 256
     indices1 = np.where(sims > 0.9)
     indices2 = np.where(indices1[0] != indices1[1])
     petids1 = [train_petids[i] for i in indices1[0][indices2]]
     petids2 = [test_petids[i] for i in indices1[1][indices2]]
-    dups = {tuple(sorted([petid1, petid2])):True for petid1, petid2 in zip(petids1, petids2)}
-    logger.info('found %d duplicates' % len(dups))
+    dups = {tuple([petid1, petid2]): True for petid1, petid2 in zip(petids1, petids2)}
+    logger.info(f'found {len(dups)} duplicates')
 
     return dups
     
-def submission_with_postprocess(y_pred):
+def submission_with_postprocessV3(y_pred):
     df_sub = pd.read_csv('../input/petfinder-adoption-prediction/test/sample_submission.csv')
     train = pd.read_csv('../input/petfinder-adoption-prediction/train/train.csv')
     df_sub["AdoptionSpeed"] = y_pred
@@ -349,20 +376,18 @@ def submission_with_postprocess(y_pred):
     duplicated = find_duplicates_all()
     duplicated = pd.DataFrame(duplicated, index=range(0)).T.reset_index()
     duplicated.columns = ['pet_id_0', 'pet_id_1']
+    duplicated.drop_duplicates(['pet_id_1'], inplace=True)
 
     duplicated_0 = duplicated.merge(train[['PetID', 'AdoptionSpeed']], how='left', left_on='pet_id_0', right_on='PetID').dropna()
     df_sub = df_sub.merge(duplicated_0[['pet_id_1', 'AdoptionSpeed']], 
                           how='left', left_on='PetID', right_on='pet_id_1', suffixes=('_original', ''))
     df_sub['AdoptionSpeed'].fillna(df_sub['AdoptionSpeed_original'], inplace=True)
     df_sub = df_sub[['PetID', 'AdoptionSpeed']]
-
-    duplicated_1 = duplicated.merge(train[['PetID', 'AdoptionSpeed']], 
-                                    how='left', left_on='pet_id_1', right_on='PetID').dropna()
-    df_sub = df_sub.merge(duplicated_1[['pet_id_0', 'AdoptionSpeed']], 
-                          how='left', left_on='PetID', right_on='pet_id_0', suffixes=('_original', ''))
-    df_sub['AdoptionSpeed'].fillna(df_sub['AdoptionSpeed_original'], inplace=True)
-    df_sub = df_sub[['PetID', 'AdoptionSpeed']]
-    df_sub['AdoptionSpeed'] = df_sub['AdoptionSpeed'].astype('int32')
+    
+    n = len(y_pred) - np.sum(y_pred==df_sub['AdoptionSpeed'])
+    logger.info(f'changed {n} duplicates')
+    
+    df_sub["AdoptionSpeed"] = df_sub["AdoptionSpeed"].astype(np.int32)
     # submission
     df_sub.to_csv('submission.csv', index=False)
     
@@ -701,72 +726,6 @@ class BM25Transformer(BaseEstimator, TransformerMixin):
 
         return X
 
-class classification_feature(object):
-    '''
-    xgboostによる判別結果を特徴量にする
-    i.e. AdoptionSpeed=4か否かを判別するxgboostを学習, その予測確率を特徴量とする
-
-    Args:
-        X_train     : 学習データ
-        y_train     : 学習データ
-        X_test      : テストデータ
-        target_speed: 学習するAdoptionSpeed
-        n_split     : fold数
-        params      : xgboostのパラメータ
-
-    Returns:
-        (np.array) cls_feat_train, cls_feat_test
-    '''
-
-    def calc_feature(self, X_train, y_train, X_test, target_speed, n_split, params):
-        kf = StratifiedKFold(n_splits=n_split, shuffle=True, random_state=1337)
-
-        # vector to store features
-        cls_feat_train = np.zeros(X_train.shape[0])
-        cls_feat_test = np.zeros((X_test.shape[0], n_split))
-
-        cnt = 0
-        for train_idx, valid_idx in kf.split(X_train, y_train):
-            # train/valid split
-            X_tr = X_train.iloc[train_idx, :]
-            y_tr = y_train[train_idx]
-            X_val = X_train.iloc[valid_idx, :]
-            y_val = y_train[valid_idx]
-
-            # i.e. AdoptionSpeed : 0 -> 1, {1,2,3,4} -> 0
-            y_tr = y_tr.apply(lambda x: 1 if x == target_speed else 0)
-            y_val = y_val.apply(lambda x: 1 if x == target_speed else 0)
-
-            # create features using xgboost classifier
-            cls_feat_train[valid_idx], cls_feat_test[:, cnt] = self.xgb_classifier(X_tr, y_tr, X_val, y_val, X_test,
-                                                                                   cls_params)
-            cnt += 1
-
-        # rowMeans
-        cls_feat_test = np.mean(cls_feat_test, 1)
-
-        return cls_feat_train, cls_feat_test
-
-    def xgb_classifier(self, X_tr, y_tr, X_val, y_val, X_test, cls_params):
-        # train/valid
-        d_train = xgb.DMatrix(data=X_tr, label=y_tr, feature_names=X_tr.columns)
-        d_valid = xgb.DMatrix(data=X_val, label=y_val, feature_names=X_val.columns)
-
-        # train xgboost
-        watchlist = [(d_train, 'train'), (d_valid, 'valid')]
-        model = xgb.train(dtrain=d_train,
-                          evals=watchlist,
-                          params=cls_params,
-                          num_boost_round=cls_params['num_boost_round'],
-                          verbose_eval=cls_params['verbose_eval'],
-                          early_stopping_rounds=cls_params['early_stopping_rounds'])
-
-        # prediction (feature)
-        valid_pred = model.predict(xgb.DMatrix(X_val, feature_names=X_val.columns), ntree_limit=model.best_ntree_limit)
-        test_pred = model.predict(xgb.DMatrix(X_test, feature_names=X_test.columns), ntree_limit=model.best_ntree_limit)
-
-        return valid_pred, test_pred
-
 # ===============
 # For pet
 # ===============
@@ -924,42 +883,7 @@ def merge_breed_name_sub(train):
     train.drop(['BreedID'], axis=1, inplace=True)
     
     return train
-
-def merge_breed_ranking(train):
-    breeds = pd.read_csv('../input/breed-labels-with-ranks/breed_labels_with_ranks.csv').drop("BreedName", axis=1)
-    train = train.merge(breeds, how="left", left_on="fix_Breed1", right_on="BreedID")
-    train = train.rename(columns={"BreedCatRank": "BreedCatRank_main", "BreedDogRank": "BreedDogRank_main"})
-    train = train.merge(breeds, how="left", left_on="fix_Breed2", right_on="BreedID")
-    train = train.rename(columns={"BreedCatRank": "BreedCatRank_second", "BreedDogRank": "BreedDogRank_second"})
-
-    return train
-
-def breed_mismatch(train):
-    breed_labels = pd.read_csv('../input/petfinder-adoption-prediction/breed_labels.csv')
-    dog_breed_labels_set = list(breed_labels[breed_labels['Type'] == 1]['BreedID'])
-    dog_breed_labels_set.remove(307)
-    train['breeds_mismatch'] = list((train['Type'] == 2) & (
-                (train['fix_Breed1'].isin(dog_breed_labels_set)) | (train['fix_Breed2'].isin(dog_breed_labels_set))))
-    train['breeds_mismatch'] = train['breeds_mismatch'].astype(int)
-
-    return train
-
-def breed_mismatch_desc(train):
-    train['desc_contain_dog'] = train['Description'].str.lower().str.contains(' dog | dogs ')
-    train['desc_contain_cat'] = train['Description'].str.lower().str.contains(' cat | cats ')
-    train['desc_miss_match'] = list((train['Type'] == 1) & (train['desc_contain_cat']))
-    train['desc_miss_match'] = train['desc_miss_match'].astype(int)
-
-    return train
-
-def breed_mismatch_meta(train):
-    train['annot_contain_dog'] = train['annots_top_desc'].str.lower().str.contains(' dog | dogs ')
-    train['annot_contain_cat'] = train['annots_top_desc'].str.lower().str.contains(' cat | cats ')
-    train['annot_miss_match'] = list((train['Type'] == 1) & (train['annot_contain_cat']))
-    train['annot_miss_match'] = train['annot_miss_match'].astype(int)
-
-    return train
-
+      
 def extract_emojis(text, emoji_list):
     return ' '.join(c for c in text if c in emoji_list)
     
@@ -1010,7 +934,8 @@ def get_name_features(train):
     return train
 
 class MetaDataParser(object):   
-    def __init__(self):
+    def __init__(self, n_jobs=1):
+        self.n_jobs = n_jobs
         # sentiment files
         train_sentiment_files = sorted(glob.glob('../input/petfinder-adoption-prediction/train_sentiment/*.json'))
         test_sentiment_files = sorted(glob.glob('../input/petfinder-adoption-prediction/test_sentiment/*.json'))
@@ -1169,6 +1094,43 @@ class MetaDataParser(object):
             result = self.parse_metadata(file)
         return result
     
+    def process_sentiment(self, df):
+        return df.apply(lambda x: self._transform(x, sentiment=True))
+    
+    def process_metadata(self, df):
+        return df.apply(lambda x: self._transform(x, sentiment=False))
+        
+    def transform_sentiment(self):
+        with multiprocessing.Pool(processes=self.n_jobs) as p:
+            split_dfs = np.array_split(self.sentiment_files['sentiment_filename'], self.n_jobs)
+            pool_results = p.map(self.process_sentiment, split_dfs)
+        self.sentiment_features = pd.concat(pool_results)
+        self.sentiment_files = pd.concat([self.sentiment_files, self.sentiment_features], axis=1, sort=False)
+        
+    def transform_metadata(self):
+        with multiprocessing.Pool(processes=self.n_jobs) as p:
+            split_dfs = np.array_split(self.metadata_files['metadata_filename'], self.n_jobs)
+            pool_results = p.map(self.process_metadata, split_dfs)
+        self.metadata_features = pd.concat(pool_results)
+        self.metadata_files = pd.concat([self.metadata_files, self.metadata_features], axis=1, sort=False)
+        
+    def transform(self, train):
+        self.transform_sentiment()
+        stats = ['mean']
+        columns = [c for c in self.sentiment_features.columns if c not in ['sentiment_text', 'sentiment_entities']]
+        self.g1 = self.sentiment_files[list(self.sentiment_features.columns) + ['PetID']].groupby('PetID').agg(stats)
+        self.g1.columns = [c + '_' + stat for c in columns for stat in stats]
+        train = train.merge(self.g1, how='left', on='PetID')
+
+        self.transform_metadata()
+        stats = ['mean', 'min', 'max', 'median', 'var', 'sum', 'first']
+        columns = [c for c in self.metadata_features.columns if c not in ['annots_top_desc', 'annots_top_desc_pick']]
+        self.g2 = self.metadata_files[columns + ['PetID']].groupby('PetID').agg(stats)
+        self.g2.columns = [c + '_' + stat for c in columns for stat in stats]
+        train = train.merge(self.g2, how='left', on='PetID')
+        
+        return train
+
 def pretrained_w2v(train_text, model, name):
     train_corpus = [text_to_word_sequence(text) for text in train_text]
 
@@ -1247,7 +1209,7 @@ def w2v_pymagnitude(train_text, model, name):
         vec = vec / (n_w + 1)
         result.append(vec)
 
-    w2v_cols = ["{}{}".format(name, i) for i in range(1, model.dim + 1)]
+    w2v_cols = ["{}_mag{}".format(name, i) for i in range(1, model.dim+1)]
     result = pd.DataFrame(result)
     result.columns = w2v_cols
     
@@ -1285,11 +1247,10 @@ def resize_to_square(im):
     new_im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT,value=color)
     return new_im
 
-def load_image(path, preprocesssing):
+def load_image(path):
     image = cv2.imread(path)
     new_image = resize_to_square(image)
-    new_image = preprocesssing(new_image)
-    return new_image
+    return preprocess_input_dense(new_image), preprocess_input_incep(new_image)
 
 def get_age_feats(df):
     df["Age_year"] = (df["Age"] / 12).astype(np.int32)
@@ -1313,13 +1274,7 @@ def getSize(filename):
 def getDimensions(filename):
     img_size = Image.open(filename).size
     return img_size 
-
-def is_zh(in_str):
-    """
-    SJISに変換して文字数が減れば簡体字があるので中国語
-    """
-    return (set(in_str) - set(in_str.encode('sjis','ignore').decode('sjis'))) != set([])
-
+    
 # ===============
 # Model
 # ===============
@@ -1488,8 +1443,409 @@ class StratifiedGroupKFold():
             train_index = indices[fold['fold_id'] != i]
             valid_index = indices[fold['fold_id'] == i]
             yield train_index, valid_index
-    
-    
+
+# ===============
+# NN
+# ===============
+class CyclicLR(Callback):
+    def __init__(self, base_lr=0.001, max_lr=0.006, step_size=2000., mode='triangular',
+                 gamma=1., scale_fn=None, scale_mode='cycle'):
+        super(CyclicLR, self).__init__()
+
+        self.base_lr = base_lr
+        self.max_lr = max_lr
+        self.step_size = step_size
+        self.mode = mode
+        self.gamma = gamma
+        if scale_fn == None:
+            if self.mode == 'triangular':
+                self.scale_fn = lambda x: 1.
+                self.scale_mode = 'cycle'
+            elif self.mode == 'triangular2':
+                self.scale_fn = lambda x: 1 / (2. ** (x - 1))
+                self.scale_mode = 'cycle'
+            elif self.mode == 'exp_range':
+                self.scale_fn = lambda x: gamma ** (x)
+                self.scale_mode = 'iterations'
+        else:
+            self.scale_fn = scale_fn
+            self.scale_mode = scale_mode
+        self.clr_iterations = 0.
+        self.trn_iterations = 0.
+        self.history = {}
+
+        self._reset()
+
+    def _reset(self, new_base_lr=None, new_max_lr=None,
+               new_step_size=None):
+        """Resets cycle iterations.
+        Optional boundary/step size adjustment.
+        """
+        if new_base_lr != None:
+            self.base_lr = new_base_lr
+        if new_max_lr != None:
+            self.max_lr = new_max_lr
+        if new_step_size != None:
+            self.step_size = new_step_size
+        self.clr_iterations = 0.
+
+    def clr(self):
+        cycle = np.floor(1 + self.clr_iterations / (2 * self.step_size))
+        x = np.abs(self.clr_iterations / self.step_size - 2 * cycle + 1)
+        if self.scale_mode == 'cycle':
+            return self.base_lr + (self.max_lr - self.base_lr) * np.maximum(0, (1 - x)) * self.scale_fn(cycle)
+        else:
+            return self.base_lr + (self.max_lr - self.base_lr) * np.maximum(0, (1 - x)) * self.scale_fn(
+                self.clr_iterations)
+
+    def on_train_begin(self, logs={}):
+        logs = logs or {}
+
+        if self.clr_iterations == 0:
+            K.set_value(self.model.optimizer.lr, self.base_lr)
+        else:
+            K.set_value(self.model.optimizer.lr, self.clr())
+
+    def on_batch_end(self, epoch, logs=None):
+
+        logs = logs or {}
+        self.trn_iterations += 1
+        self.clr_iterations += 1
+
+        self.history.setdefault('lr', []).append(K.get_value(self.model.optimizer.lr))
+        self.history.setdefault('iterations', []).append(self.trn_iterations)
+
+        for k, v in logs.items():
+            self.history.setdefault(k, []).append(v)
+
+        K.set_value(self.model.optimizer.lr, self.clr())
+
+
+class Attention(Layer):
+    def __init__(self, step_dim,
+                 W_regularizer=None, b_regularizer=None,
+                 W_constraint=None, b_constraint=None,
+                 bias=True, **kwargs):
+        """
+        Keras Layer that implements an Attention mechanism for temporal data.
+        Supports Masking.
+        Follows the work of Raffel et al. [https://arxiv.org/abs/1512.08756]
+        # Input shape
+            3D tensor with shape: `(samples, steps, features)`.
+        # Output shape
+            2D tensor with shape: `(samples, features)`.
+        :param kwargs:
+        Just put it on top of an RNN Layer (GRU/LSTM/SimpleRNN) with
+        return_sequences = True.
+        The dimensions are inferred based on the output shape of the RNN.
+        Example:
+            model.add(LSTM(64, return_sequences=True))
+            model.add(Attention())
+        """
+        self.supports_masking = True
+        self.init = initializers.get('glorot_uniform')
+
+        self.W_regularizer = regularizers.get(W_regularizer)
+        self.b_regularizer = regularizers.get(b_regularizer)
+
+        self.W_constraint = constraints.get(W_constraint)
+        self.b_constraint = constraints.get(b_constraint)
+
+        self.bias = bias
+        self.step_dim = step_dim
+        self.features_dim = 0
+        super(Attention, self).__init__(**kwargs)
+
+    def build(self, input_shape):
+        assert len(input_shape) == 3
+
+        self.W = self.add_weight((input_shape[-1],),
+                                 initializer=self.init,
+                                 name='{}_W'.format(self.name),
+                                 regularizer=self.W_regularizer,
+                                 constraint=self.W_constraint)
+        self.features_dim = input_shape[-1]
+
+        if self.bias:
+            self.b = self.add_weight((input_shape[1],),
+                                     initializer='zero',
+                                     name='{}_b'.format(self.name),
+                                     regularizer=self.b_regularizer,
+                                     constraint=self.b_constraint)
+        else:
+            self.b = None
+
+        self.built = True
+
+    def compute_mask(self, input, input_mask=None):
+        return None
+
+    def call(self, x, mask=None):
+        features_dim = self.features_dim
+        step_dim = self.step_dim
+
+        eij = K.reshape(K.dot(K.reshape(x, (-1, features_dim)),
+                        K.reshape(self.W, (features_dim, 1))), (-1, step_dim))
+
+        if self.bias:
+            eij += self.b
+
+        eij = K.tanh(eij)
+
+        a = K.exp(eij)
+
+        if mask is not None:
+            a *= K.cast(mask, K.floatx())
+
+        a /= K.cast(K.sum(a, axis=1, keepdims=True) + K.epsilon(), K.floatx())
+
+        a = K.expand_dims(a)
+        weighted_input = x * a
+        return K.sum(weighted_input, axis=1)
+
+    def compute_output_shape(self, input_shape):
+        return input_shape[0],  self.features_dim
+
+
+def se_block(input, channels, r=8):
+    x = Dense(channels//r, activation="relu")(input)
+    x = Dense(channels, activation="sigmoid")(x)
+    return Multiply()([input, x])
+
+
+def libfm_block(categorical_inputs, categorical_features, embedding_size=8):
+    biases = [get_embed(x, X_train[column].max() + 1, 1) for (
+        x, column) in zip(categorical_inputs, categorical_features)]
+    factors = [get_embed(x, X_train[column].max() + 1, embedding_size) for (
+        x, column) in zip(categorical_inputs, categorical_features)]
+    s = Add()(factors)
+    diffs = [Subtract()([s, x]) for x in factors]
+    dots = [Dot(axes=1)([d, x]) for d, x in zip(diffs, factors)]
+    c = Concatenate()(biases + dots)
+    return c
+
+
+def get_embed(x, maxvalue, embedding_size):
+    embed = Embedding(maxvalue, embedding_size, input_length=1)(x)
+    embed = Flatten()(embed)
+    return embed
+
+
+def get_model(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.5, weight_decay=0.1):
+    inp_cats = []
+    embs = []
+    for c in categorical_features:
+        inp_cat = Input(shape=[1], name=c)
+        inp_cats.append(inp_cat)
+        embs.append((Embedding(X_train[c].max() + 1, emb_n)(inp_cat)))
+    for c in important_categorical:
+        inp_cat = Input(shape=[1], name=c)
+        inp_cats.append(inp_cat)
+        embs.append((Embedding(X_train[c].max() + 1, emb_n_imp)(inp_cat)))
+    cats = Flatten()(concatenate(embs))
+    cats = Dense(8, activation="linear")(cats)
+    cats = BatchNormalization()(cats)
+    cats = PReLU()(cats)
+    cats = Dropout(dout / 2)(cats)
+
+    #fms = libfm_block(inp_cats, categorical_features+important_categorical, embedding_size=8)
+    #fms = Dense(8, activation="linear")(fms)
+    #fms = BatchNormalization()(fms)
+    #fms = PReLU()(fms)
+    #fms = Dropout(dout / 2)(fms)
+
+    inp_numerical = Input(shape=(len(numerical),), name="numerical")
+    inp_important_numerical = Input(shape=(len(important_numerical),), name="important_numerical")
+    nums = concatenate([inp_numerical, inp_important_numerical])
+    nums = Dense(32, activation="linear")(nums)
+    nums = BatchNormalization()(nums)
+    nums = PReLU()(nums)
+    nums = Dropout(dout)(nums)
+
+    inp_dense = Input(shape=(len(dense_cols),), name="dense_cols")
+    x_dense = Dense(32, activation="linear")(inp_dense)
+    x_dense = BatchNormalization()(x_dense)
+    x_dense = PReLU()(x_dense)
+
+    inp_inception = Input(shape=(len(inception_cols),), name="inception_cols")
+    x_inception = Dense(32, activation="linear")(inp_inception)
+    x_inception = BatchNormalization()(x_inception)
+    x_inception = PReLU()(x_inception)
+
+    x_img = concatenate([x_dense, x_inception])
+    x_img = Dense(32, activation="linear")(x_img)
+    x_img = BatchNormalization()(x_img)
+    x_img = PReLU()(x_img)
+    x_img = Dropout(dout)(x_img)
+
+    inp_desc = Input(shape=(max_len,), name="description")
+    emb_desc = Embedding(len(embedding_matrix), embedding_dim, weights=[embedding_matrix], trainable=False)(inp_desc)
+    emb_desc = SpatialDropout1D(0.2)(emb_desc)
+    x1 = Bidirectional(CuDNNLSTM(32, return_sequences=True))(emb_desc)
+    x2 = Bidirectional(CuDNNGRU(32, return_sequences=True))(x1)
+
+    att2 = Attention(max_len)(x2)
+    conc = BatchNormalization()(att2)
+
+    conc = Dense(32, activation="linear")(conc)
+    conc = BatchNormalization()(conc)
+    conc = PReLU()(conc)
+    conc = Dropout(dout)(conc)
+
+    x = concatenate([conc, x_img, nums, cats, inp_important_numerical])
+    x = se_block(x, 32 + 32 + 32 + 8 + len(important_numerical))
+    x = BatchNormalization()(x)
+    x = Dropout(dout)(x)
+    x = concatenate([x, inp_important_numerical])
+    x = BatchNormalization()(x)
+    x = Dropout(dout / 2)(x)
+
+    out = Dense(1, activation="linear")(x)
+
+    model = Model(inputs=inp_cats + [inp_numerical, inp_important_numerical, inp_dense, inp_inception, inp_desc],
+                  outputs=out)
+    model.compile(optimizer="adam", loss=rmse)
+    return model
+
+def get_keras_data(df, description_embeds):
+    X = {
+        "numerical": df[numerical].values,
+        "important_numerical": df[important_numerical].values,
+        "description": description_embeds,
+        "dense_cols": df[dense_cols],
+        "inception_cols": df[inception_cols]
+    }
+    for c in categorical_features + important_categorical:
+        X[c] = df[c]
+    return X
+
+def rmse(y, y_pred):
+    return K.sqrt(K.mean(K.square(y - y_pred), axis=-1))
+
+def w2v_fornn(train_text, model, max_len):
+    tokenizer = Tokenizer()
+    tokenizer.fit_on_texts(list(train_text))
+    train_text = tokenizer.texts_to_sequences(train_text)
+    train_text = pad_sequences(train_text, maxlen=max_len)
+    word_index = tokenizer.word_index
+
+    embedding_dim = model.dim
+    embedding_matrix = np.zeros((len(word_index) + 1, embedding_dim))
+
+    result = []
+    for word, i in word_index.items():
+        if word in model:  # 0.9906
+            embedding_matrix[i] = model.query(word)
+            continue
+        word_ = word.upper()
+        if word_ in model:  # 0.9909
+            embedding_matrix[i] = model.query(word_)
+            continue
+        word_ = word.capitalize()
+        if word_ in model:  # 0.9925
+            embedding_matrix[i] = model.query(word_)
+            continue
+        word_ = ps.stem(word)
+        if word_ in model:  # 0.9927
+            embedding_matrix[i] = model.query(word_)
+            continue
+        word_ = lc.stem(word)
+        if word_ in model:  # 0.9932
+            embedding_matrix[i] = model.query(word_)
+            continue
+        word_ = sb.stem(word)
+        if word_ in model:  # 0.9933
+            embedding_matrix[i] = model.query(word_)
+            continue
+        embedding_matrix[i] = model.query(word)
+
+    return train_text, embedding_matrix, embedding_dim, word_index
+
+
+def fasttext_fornn(train_text, model, max_len):
+    tokenizer = Tokenizer()
+    tokenizer.fit_on_texts(list(train_text))
+    train_text = tokenizer.texts_to_sequences(train_text)
+    train_text = pad_sequences(train_text, maxlen=max_len)
+    word_index = tokenizer.word_index
+
+    embedding_dim = model.vector_size
+    embedding_matrix = np.zeros((len(word_index) + 1, embedding_dim))
+
+    result = []
+    for word, i in word_index.items():
+        if word in model:  # 0.9906
+            embedding_matrix[i] = model.wv[word]
+            continue
+        word_ = word.upper()
+        if word_ in model:  # 0.9909
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        word_ = word.capitalize()
+        if word_ in model:  # 0.9925
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        word_ = ps.stem(word)
+        if word_ in model:  # 0.9927
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        word_ = lc.stem(word)
+        if word_ in model:  # 0.9932
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        word_ = sb.stem(word)
+        if word_ in model:  # 0.9933
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        embedding_matrix[i] = np.zeros(embedding_dim)
+
+    return train_text, embedding_matrix, embedding_dim, word_index
+
+
+def self_train_w2v_tonn(train_text, max_len, w2v_params, mode="w2v"):
+    train_corpus = [text_to_word_sequence(text) for text in train_text]
+    if mode == "w2v":
+        model = word2vec.Word2Vec(train_corpus, **w2v_params)
+    elif mode == "fasttext":
+        model = FastText(train_corpus, **w2v_params)
+
+    tokenizer = Tokenizer()
+    tokenizer.fit_on_texts(list(train_text))
+    train_text = tokenizer.texts_to_sequences(train_text)
+    train_text = pad_sequences(train_text, maxlen=max_len)
+    word_index = tokenizer.word_index
+
+    embedding_dim = model.vector_size
+    embedding_matrix = np.zeros((len(word_index) + 1, embedding_dim))
+
+    for word, i in word_index.items():
+        if word in model:  # 0.9906
+            embedding_matrix[i] = model.wv[word]
+            continue
+        word_ = word.upper()
+        if word_ in model:  # 0.9909
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        word_ = word.capitalize()
+        if word_ in model:  # 0.9925
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        word_ = ps.stem(word)
+        if word_ in model:  # 0.9927
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        word_ = lc.stem(word)
+        if word_ in model:  # 0.9932
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        word_ = sb.stem(word)
+        if word_ in model:  # 0.9933
+            embedding_matrix[i] = model.wv[word_]
+            continue
+        embedding_matrix[i] = np.zeros(embedding_dim)
+
+    return train_text, embedding_matrix, embedding_dim, word_index
+
 if __name__ == '__main__':
     init_logger()
     seed_everything(seed=seed)
@@ -1533,33 +1889,19 @@ if __name__ == '__main__':
             
         train[text_features].fillna('missing', inplace=True)
         with timer('preprocess metadata'): #使ってるcolsがkaeruさんとtakuokoで違う kaeruさんがfirst系は全部使うが、takuokoは使わない
-            # TODO: parallelization
-            meta_parser = MetaDataParser()
-            sentiment_features = meta_parser.sentiment_files['sentiment_filename'].apply(lambda x: meta_parser._transform(x, sentiment=True))
-            meta_parser.sentiment_files = pd.concat([meta_parser.sentiment_files, sentiment_features], axis=1, sort=False)
-            meta_features = meta_parser.metadata_files['metadata_filename'].apply(lambda x: meta_parser._transform(x, sentiment=False))
-            meta_parser.metadata_files = pd.concat([meta_parser.metadata_files, meta_features], axis=1, sort=False)
+            meta_parser = MetaDataParser(n_jobs=cpu_count)
+            train = meta_parser.transform(train)
 
-            stats = ['mean']
-            columns = [c for c in sentiment_features.columns if c not in ['sentiment_text', 'sentiment_entities']]
-            g = meta_parser.sentiment_files[list(sentiment_features.columns) + ['PetID']].groupby('PetID').agg(stats)
-            g.columns = [c + '_' + stat for c in columns for stat in stats]
-            train = train.merge(g, how='left', on='PetID')
-            k_cols += [c for c in g.columns if re.match("\w*_mean_\w*mean", c)] + ["magnitude_mean", "score_mean"]
-            t_cols += [c for c in g.columns if re.match("\w*_sum_\w*mean", c)] + ["magnitude_mean", "score_mean"]
-            g_cols  += list(g.columns)
+            k_cols += [c for c in meta_parser.g1.columns if re.match("\w*_mean_\w*mean", c)] + ["magnitude_mean", "score_mean"]
+            t_cols += [c for c in meta_parser.g1.columns if re.match("\w*_sum_\w*mean", c)] + ["magnitude_mean", "score_mean"]
+            g_cols  += list(meta_parser.g1.columns)
 
-            stats = ['mean', 'min', 'max', 'median', 'var', 'sum', 'first']
-            columns = [c for c in meta_features.columns if c not in ['annots_top_desc', 'annots_top_desc_pick']]
-            g = meta_parser.metadata_files[columns + ['PetID']].groupby('PetID').agg(stats)
-            g.columns = [c + '_' + stat for c in columns for stat in stats]
-            train = train.merge(g, how='left', on='PetID')
-            k_cols += [c for c in g.columns if ("mean_mean" in c or "mean_sum" in c or "first_first" in c) and "annots_score_normal" not in c] + \
+            k_cols += [c for c in meta_parser.g2.columns if ("mean_mean" in c or "mean_sum" in c or "first_first" in c) and "annots_score_normal" not in c] + \
                         ['crop_conf_first', 'crop_x_first', 'crop_y_first', 'crop_importance_first', 'crop_conf_mean', 
                        'crop_conf_sum', 'crop_importance_mean', 'crop_importance_sum']
-            t_cols += [c for c in g.columns if ((re.match("\w*_sum_\w*(?<!sum)$", c) and "first" not in c) \
+            t_cols += [c for c in meta_parser.g2.columns if ((re.match("\w*_sum_\w*(?<!sum)$", c) and "first" not in c) \
                        or ("sum" not in c and "first" not in c)) and "annots_score_pick" not in c]
-            g_cols += [c for c in g.columns if "mean_mean" in c or "mean_sum" in c or "mean_var" in c and "annots_score_pick" not in c] + \
+            g_cols += [c for c in meta_parser.g2.columns if "mean_mean" in c or "mean_sum" in c or "mean_var" in c and "annots_score_pick" not in c] + \
                         ['crop_conf_mean', 'crop_conf_sum', 'crop_conf_var', 'crop_importance_mean',
                        'crop_importance_sum', 'crop_importance_var']
             
@@ -1583,110 +1925,17 @@ if __name__ == '__main__':
             del meta_features_all, meta_features_pick, meta_features, sentiment_features; gc.collect()
             
         with timer('make image features'):
-            train_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/train_images/*.jpg'))
-            test_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/test_images/*.jpg'))
-            image_files = train_image_files + test_image_files
-            train_images = pd.DataFrame(image_files, columns=['image_filename'])
-            train_images['PetID'] = train_images['image_filename'].apply(lambda x: x.split('/')[-1].split('-')[0])
-
-        with timer('breed mismatch features'):
-            train = breed_mismatch(train)
-            train = breed_mismatch_desc(train)
-            train = breed_mismatch_meta(train)
-            t_cols += ['breeds_mismatch', 'desc_contain_dog', 'desc_contain_cat', 'desc_miss_match',
-                       'annot_contain_dog', 'annot_contain_cat', 'annot_miss_match']
-            k_cols += ['breeds_mismatch', 'desc_miss_match', 'annot_miss_match']
-
-        with timer('preprocess pretrained CNN'):
-            if debug:
-                import feather
-
-                X = feather.read_dataframe("feature/dense121_2_X.feather")
-                gp_img = X.groupby("PetID").mean().reset_index()
-                train = pd.merge(train, gp_img, how="left", on="PetID")
-                gp_dense_first = X.groupby("PetID").first().reset_index()
-
-                X = feather.read_dataframe("feature/inception_resnet.feather")
-                train = pd.concat((train, X), axis=1)
-                t_cols += list(gp_img.columns.drop("PetID"))
-                t_cols += list(X.columns.drop("PetID"))
-                del gp_img;
-                gc.collect()
-            else:
-                pet_ids = train_images['PetID'].values
-                img_pathes = train_images['image_filename'].values
-                n_batches = len(pet_ids) // batch_size + 1
-
-                inp = Input((256, 256, 3))
-                backbone = DenseNet121(input_tensor=inp,
-                                       weights='../input/petfinderdatasets/densenet121_weights_tf_dim_ordering_tf_kernels_notop.h5',
-                                       include_top=False)
-                x = backbone.output
-                x = GlobalAveragePooling2D()(x)
-                x = Lambda(lambda x: K.expand_dims(x, axis=-1))(x)
-                x = AveragePooling1D(4)(x)
-                out = Lambda(lambda x: x[:, :, 0])(x)
-                model_dense = Model(inp, out)
-
-                inp2 = Input((256, 256, 3))
-                backbone2 = InceptionResNetV2(input_tensor=inp2,
-                                              weights='../input/petfinderdatasets/inception_resnet_v2_weights_tf_dim_ordering_tf_kernels_notop.h5',
-                                              include_top=False)
-                x2 = backbone2.output
-                x2 = GlobalAveragePooling2D()(x2)
-                x2 = Lambda(lambda x: K.expand_dims(x, axis=-1))(x2)
-                x2 = AveragePooling1D(4)(x2)
-                out2 = Lambda(lambda x: x[:, :, 0])(x2)
-                model_inception = Model(inp2, out2)
-
-                features_dense = []
-                features_inception = []
-                for b in range(n_batches):
-                    start = b * batch_size
-                    end = (b + 1) * batch_size
-                    batch_pets = pet_ids[start: end]
-                    batch_path = img_pathes[start: end]
-                    batch_images = np.zeros((len(batch_pets), img_size, img_size, 3))
-                    for i, (pet_id, path) in enumerate(zip(batch_pets, batch_path)):
-                        try:
-                            batch_images[i] = load_image(path, preprocess_input_dense)
-                        except:
-                            try:
-                                batch_images[i] = load_image(path, preprocess_input_dense)
-                            except:
-                                pass
-                    batch_preds_dense = model_dense.predict(batch_images)
-                    batch_preds_inception = model_inception.predict(batch_images)
-                    for i, pet_id in enumerate(batch_pets):
-                        features_dense.append([pet_id] + list(batch_preds_dense[i]))
-                        features_inception.append([pet_id] + list(batch_preds_inception[i]))
-
-                X = pd.DataFrame(features_dense, columns=["PetID"] + ["dense121_2_{}".format(i) for i in
-                                                                      range(batch_preds_dense.shape[1])])
-                gp_img = X.groupby("PetID").mean().reset_index()
-                train = pd.merge(train, gp_img, how="left", on="PetID")
-                gp_dense_first = X.groupby("PetID").first().reset_index()
-                t_cols += list(gp_img.columns.drop("PetID"))
-                del model_dense, model_inception, X, gp_img;
-                gc.collect();
-                K.clear_session()
-
-                X = pd.DataFrame(features_inception, columns=["PetID"] + ["inception_resnet_{}".format(i) for i in
-                                                                          range(batch_preds_inception.shape[1])])
-                gp_img = X.groupby("PetID").mean().reset_index()
-                train = pd.merge(train, gp_img, how="left", on="PetID")
-                t_cols += list(gp_img.columns.drop("PetID"))
-                del gp_img, X;
-                gc.collect()
+                train_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/train_images/*.jpg'))
+                test_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/test_images/*.jpg'))
+                image_files = train_image_files + test_image_files
+                train_images = pd.DataFrame(image_files, columns=['image_filename'])
+                train_images['PetID'] = train_images['image_filename'].apply(lambda x: x.split('/')[-1].split('-')[0])
         
     if T_flag:
         with timer('takuoko features'): 
             orig_cols = train.columns
             with timer('merge emoji files'):   
                 train = merge_emoji(train)
-
-            with timer('preprocess breed files'):
-                train = merge_breed_ranking(train)
 
             with timer('preprocess and simple features'): 
                 train = get_interactions(train)
@@ -1704,7 +1953,7 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['Description_bow'])
+                X = vectorizer.fit_transform(train['Description_bow']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['tfidf_svd_{}'.format(i) for i in range(n_components)]
                                  + ['tfidf_nmf_{}'.format(i) for i in range(n_components)]
                                 + ['tfidf_bm25_{}'.format(i) for i in range(n_components)])
@@ -1724,7 +1973,7 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['Description_bow'])
+                X = vectorizer.fit_transform(train['Description_bow']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['count_svd_{}'.format(i) for i in range(n_components)]
                                  + ['count_nmf_{}'.format(i) for i in range(n_components)]
                                 + ['count_bm25_{}'.format(i) for i in range(n_components)])
@@ -1746,7 +1995,7 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['Description_bow'])
+                X = vectorizer.fit_transform(train['Description_bow']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['tfidf2_svd_{}'.format(i) for i in range(n_components)]
                                  + ['tfidf2_nmf_{}'.format(i) for i in range(n_components)]
                                 + ['tfidf2_bm25_{}'.format(i) for i in range(n_components)])
@@ -1768,7 +2017,7 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['Description_bow'])
+                X = vectorizer.fit_transform(train['Description_bow']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['count2_svd_{}'.format(i) for i in range(n_components)]
                                  + ['count2_nmf_{}'.format(i) for i in range(n_components)]
                                 + ['count2_bm25_{}'.format(i) for i in range(n_components)])
@@ -1790,7 +2039,7 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['Description_bow'])
+                X = vectorizer.fit_transform(train['Description_bow']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['tfidf3_svd_{}'.format(i) for i in range(n_components)]
                                             + ['tfidf3_nmf_{}'.format(i) for i in range(n_components)]
                                 + ['tfidf3_bm25_{}'.format(i) for i in range(n_components)])
@@ -1812,7 +2061,7 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['Description_bow'])
+                X = vectorizer.fit_transform(train['Description_bow']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['count3_svd_{}'.format(i) for i in range(n_components)]
                                             + ['count3_nmf_{}'.format(i) for i in range(n_components)]
                                 + ['count3_bm25_{}'.format(i) for i in range(n_components)])
@@ -1822,15 +2071,19 @@ if __name__ == '__main__':
             with timer('description fasttext'):  
                 embedding = '../input/quora-embedding/GoogleNews-vectors-negative300.bin'
                 model = KeyedVectors.load_word2vec_format(embedding, binary=True)
-                X = pretrained_w2v(train["Description_Emb"], model, name="gnvec")
+                X = pretrained_w2v(train["Description_Emb"], model, name="gnvec").astype(np.float32)
                 train = pd.concat([train, X], axis=1)
                 del model; gc.collect()
 
             with timer('description glove'):  
                 embedding = "../input/pymagnitude-data/glove.840B.300d.magnitude"
                 model = Magnitude(embedding)
-                X = w2v_pymagnitude(train["Description_Emb"], model, name="glove_mag")
+                X = w2v_pymagnitude(train["Description_Emb"], model, name="glove").astype(np.float32)
                 train = pd.concat([train, X], axis=1)
+
+            with timer('description glove for NN'):
+                X_desc, embedding_matrix, embedding_dim, word_index = w2v_fornn(train["Description_Emb"], model,
+                                                                                max_len)
                 del model; gc.collect()
                 
             with timer('meta text bow/tfidf->svd / nmf / bm25'): 
@@ -1852,7 +2105,7 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['desc'])
+                X = vectorizer.fit_transform(train['desc']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['meta_desc_tfidf_svd_{}'.format(i) for i in range(n_components)]
                                  + ['meta_desc_tfidf_nmf_{}'.format(i) for i in range(n_components)]
                                 + ['meta_desc_tfidf_bm25_{}'.format(i) for i in range(n_components)])
@@ -1870,7 +2123,7 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['desc'])
+                X = vectorizer.fit_transform(train['desc']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['meta_desc_count_svd_{}'.format(i) for i in range(n_components)]
                                  + ['meta_desc_count_nmf_{}'.format(i) for i in range(n_components)]
                                 + ['meta_desc_count_bm25_{}'.format(i) for i in range(n_components)])
@@ -1878,7 +2131,7 @@ if __name__ == '__main__':
                 train.drop(['desc'], axis=1, inplace=True)
                 
             with timer('image features'): 
-                train['num_images'] = train["PhotoAmt"]
+                train['num_images'] = train['PetID'].apply(lambda x: sum(train_images.PetID == x))
                 train['num_images_per_pet'] = train['num_images'] / train['Quantity']
 
             with timer('aggregation'):
@@ -2020,7 +2273,7 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['Description'])
+                X = vectorizer.fit_transform(train['Description']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['tfidf_k_svd_{}'.format(i) for i in range(n_components)])
                 #                 + ['tfidf_k_nmf_{}'.format(i) for i in range(n_components)])
                 train = pd.concat([train, X], axis=1)
@@ -2034,7 +2287,7 @@ if __name__ == '__main__':
                     "downsampling": 1e-3,
                     "epoch_num": 10
                 }
-                X = doc2vec(train["Description"], d2v_param)
+                X = doc2vec(train["Description"], d2v_param).astype(np.float32)
                 train = pd.concat([train, X], axis=1)
 
             with timer('annots_top_desc + svd / nmf'):
@@ -2047,26 +2300,10 @@ if __name__ == '__main__':
                         n_jobs=1,
                     ),
                 )
-                X = vectorizer.fit_transform(train['annots_top_desc_pick'])
+                X = vectorizer.fit_transform(train['annots_top_desc_pick']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['annots_top_desc_k_svd_{}'.format(i) for i in range(n_components)])
                 #                 + ['annots_top_desc_k_nmf_{}'.format(i) for i in range(n_components)])
                 train = pd.concat([train, X], axis=1)
-                del vectorizer; gc.collect()
-
-            with timer('densenet features'):
-                vectorizer = make_pipeline(
-                    make_union(
-                        TruncatedSVD(n_components=n_components, random_state=kaeru_seed),
-                        # NMF(n_components=n_components, random_state=kaeru_seed),
-                        # n_jobs=2,
-                        n_jobs=1,
-                    ),
-                )
-                X = vectorizer.fit_transform(gp_dense_first.drop(['PetID'], axis=1))
-                X = pd.DataFrame(X, columns=['densenet121_svd_{}'.format(i) for i in range(n_components)])
-                #                 + ['densenet121_nmf_{}'.format(i) for i in range(n_components)])
-                X["PetID"] = gp_dense_first["PetID"]
-                train = pd.merge(train, X, how="left", on="PetID")
                 del vectorizer; gc.collect()
 
             with timer('aggregation'):
@@ -2101,13 +2338,6 @@ if __name__ == '__main__':
     if G_flag:
         with timer('gege features'): 
             orig_cols = train.columns
-            with timer('densenet features'):
-                vectorizer = TruncatedSVD(n_components=n_components_gege_img, random_state=kaeru_seed)
-                X = vectorizer.fit_transform(gp_dense_first.drop(['PetID'], axis=1))
-                X = pd.DataFrame(X, columns=['densenet121_g_svd_{}'.format(i) for i in range(n_components_gege_img)])
-                X["PetID"] = gp_dense_first["PetID"]
-                train = pd.merge(train, X, how="left", on="PetID")
-                del vectorizer, gp_dense_first; gc.collect()
 
             with timer('frequency encoding'):
                 freq_cols = ['RescuerID', 'Breed1', 'Breed2', 'Color1', 'Color2', 'Color3', 'State']
@@ -2120,7 +2350,7 @@ if __name__ == '__main__':
                               ngram_range=(1, 3), use_idf=1, smooth_idf=1, sublinear_tf=1),
                     TruncatedSVD(n_components=n_components_gege_txt, random_state=kaeru_seed)
                 )
-                X = vectorizer.fit_transform(train['Description'])
+                X = vectorizer.fit_transform(train['Description']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['tfidf_g_svd_{}'.format(i) for i in range(n_components_gege_txt)])
                 train = pd.concat([train, X], axis=1)
                 del vectorizer; gc.collect()
@@ -2132,7 +2362,7 @@ if __name__ == '__main__':
                               ngram_range=(1, 3), use_idf=1, smooth_idf=1, sublinear_tf=1),
                     TruncatedSVD(n_components=n_components_gege_txt, random_state=kaeru_seed)
                 )
-                X = vectorizer.fit_transform(train['annots_top_desc'])
+                X = vectorizer.fit_transform(train['annots_top_desc']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['annots_top_desc_tfidf_g_svd_{}'.format(i) for i in range(n_components_gege_txt)])
                 train = pd.concat([train, X], axis=1)
                 del vectorizer; gc.collect()
@@ -2144,7 +2374,7 @@ if __name__ == '__main__':
                               ngram_range=(1, 3), use_idf=1, smooth_idf=1, sublinear_tf=1),
                     TruncatedSVD(n_components=n_components_gege_txt, random_state=kaeru_seed)
                 )
-                X = vectorizer.fit_transform(train['sentiment_entities'])
+                X = vectorizer.fit_transform(train['sentiment_entities']).astype(np.float32)
                 X = pd.DataFrame(X, columns=['sentiment_entities_tfidf_g_svd_{}'.format(i) for i in range(n_components_gege_txt)])
                 train = pd.concat([train, X], axis=1)
                 del vectorizer; gc.collect()
@@ -2172,6 +2402,120 @@ if __name__ == '__main__':
     dtype_cols = ['BreedName_main_breed', 'BreedName_second_breed', 'BreedName_main_breed_all']
     train[dtype_cols] = train[dtype_cols].astype("int32")
         
+    with timer('preprocess pretrained CNN'):
+        if debug:
+            import feather
+
+            X = feather.read_dataframe("feature/dense121_2_X.feather")
+            gp_img = X.groupby("PetID").mean().reset_index()
+            train = pd.merge(train, gp_img, how="left", on="PetID")
+            gp_dense_first = X.groupby("PetID").first().reset_index()
+
+            X = feather.read_dataframe("feature/inception_resnet.feather")
+            train = pd.concat((train, X), axis=1)
+            t_cols += list(gp_img.columns.drop("PetID"))
+            t_cols += list(X.columns.drop("PetID"))
+            del gp_img;
+            gc.collect()
+        else:
+            pet_ids = train_images['PetID'].values
+            img_pathes = train_images['image_filename'].values
+            # n_batches = len(pet_ids) // batch_size + 1
+            n_batches = len(pet_ids) // batch_size + (len(pet_ids) % batch_size != 0)
+
+            inp = Input((256, 256, 3))
+            backbone = DenseNet121(input_tensor=inp,
+                                    weights='../input/petfinderdatasets/densenet121_weights_tf_dim_ordering_tf_kernels_notop.h5',
+                                    include_top=False)
+            x = backbone.output
+            x = GlobalAveragePooling2D()(x)
+            x = Lambda(lambda x: K.expand_dims(x, axis=-1))(x)
+            x = AveragePooling1D(4)(x)
+            out = Lambda(lambda x: x[:, :, 0])(x)
+            model_dense = Model(inp, out)
+
+            inp2 = Input((256, 256, 3))
+            backbone2 = InceptionResNetV2(input_tensor=inp2,
+                                            weights='../input/petfinderdatasets/inception_resnet_v2_weights_tf_dim_ordering_tf_kernels_notop.h5',
+                                            include_top=False)
+            x2 = backbone2.output
+            x2 = GlobalAveragePooling2D()(x2)
+            x2 = Lambda(lambda x: K.expand_dims(x, axis=-1))(x2)
+            x2 = AveragePooling1D(4)(x2)
+            out2 = Lambda(lambda x: x[:, :, 0])(x2)
+            model_inception = Model(inp2, out2)
+
+            features_dense = []
+            features_inception = []
+            for b in range(n_batches):
+                start = b * batch_size
+                end = (b + 1) * batch_size
+                batch_pets = pet_ids[start: end]
+                batch_path = img_pathes[start: end]
+                batch_images_dense = np.zeros((len(batch_pets), img_size, img_size, 3))
+                batch_images_incep = np.zeros((len(batch_pets), img_size, img_size, 3))
+                for i, (pet_id, path) in enumerate(zip(batch_pets, batch_path)):
+                    try:
+                        batch_images_dense[i], batch_images_incep[i] = load_image(path)
+                    except:
+                        pass
+                batch_preds_dense = model_dense.predict(batch_images_dense)
+                batch_preds_inception = model_inception.predict(batch_images_incep)
+                for i, pet_id in enumerate(batch_pets):
+                    features_dense.append([pet_id] + list(batch_preds_dense[i]))
+                    features_inception.append([pet_id] + list(batch_preds_inception[i]))
+
+            X = pd.DataFrame(features_dense, columns=["PetID"] + ["dense121_2_{}".format(i) for i in
+                                                                    range(batch_preds_dense.shape[1])])
+            gp_img = X.groupby("PetID").mean().reset_index()
+            train = pd.merge(train, gp_img, how="left", on="PetID")
+            gp_dense_first = X.groupby("PetID").first().reset_index()
+            t_cols += list(gp_img.columns.drop("PetID"))
+            del model_dense, model_inception, X, gp_img;
+            gc.collect();
+            K.clear_session()
+
+            X = pd.DataFrame(features_inception, columns=["PetID"] + ["inception_resnet_{}".format(i) for i in
+                                                                        range(batch_preds_inception.shape[1])])
+            gp_img = X.groupby("PetID").mean().reset_index()
+            train = pd.merge(train, gp_img, how="left", on="PetID")
+            t_cols += list(gp_img.columns.drop("PetID"))
+            del gp_img, X;
+            gc.collect()
+            
+    if K_flag:
+        with timer('kaeru features'): 
+            orig_cols = train.columns
+            with timer('densenet features'):
+                vectorizer = make_pipeline(
+                    make_union(
+                        TruncatedSVD(n_components=n_components, random_state=kaeru_seed),
+                        # NMF(n_components=n_components, random_state=kaeru_seed),
+                        # n_jobs=2,
+                        n_jobs=1,
+                    ),
+                )
+                X = vectorizer.fit_transform(gp_dense_first.drop(['PetID'], axis=1))
+                X = pd.DataFrame(X, columns=['densenet121_svd_{}'.format(i) for i in range(n_components)])
+                #                 + ['densenet121_nmf_{}'.format(i) for i in range(n_components)])
+                X["PetID"] = gp_dense_first["PetID"]
+                train = pd.merge(train, X, how="left", on="PetID")
+                del vectorizer; gc.collect()
+
+            k_cols += [c for c in train.columns if c not in orig_cols if c not in kaeru_drop_cols]
+            
+    if G_flag:
+        with timer('gege features'): 
+            orig_cols = train.columns
+            with timer('densenet features'):
+                vectorizer = TruncatedSVD(n_components=n_components_gege_img, random_state=kaeru_seed)
+                X = vectorizer.fit_transform(gp_dense_first.drop(['PetID'], axis=1))
+                X = pd.DataFrame(X, columns=['densenet121_g_svd_{}'.format(i) for i in range(n_components_gege_img)])
+                X["PetID"] = gp_dense_first["PetID"]
+                train = pd.merge(train, X, how="left", on="PetID")
+                del vectorizer, gp_dense_first; gc.collect()
+            g_cols += [c for c in train.columns if c not in orig_cols]
+            
     logger.info(train.head())
     
     train.to_feather("all_data.feather")
@@ -2199,7 +2543,7 @@ if __name__ == '__main__':
             X.to_feather("X_train_t.feather")
             X_test.reset_index(drop=True).to_feather("X_test_t.feather")
 
-        with timer('takuoko modeling'):
+        with timer('takuoko lgbm modeling'):
             y_pred_t = np.empty(len_train,)
             y_test_t = []
             train_losses, valid_losses = [], []
@@ -2213,7 +2557,7 @@ if __name__ == '__main__':
 
                 pred_val, pred_test, train_rmse, valid_rmse = run_model(X_train, y_train, X_valid, y_valid, X_test,
                                  categorical_features_t, predictors, maxvalue_dict, fold_id, MODEL_PARAMS, MODEL_NAME+"_t")
-                y_pred_t[valid_index] = pred_val
+                y_pred_t[valid_index] = pred_val 
                 y_test_t.append(pred_test)
                 train_losses.append(train_rmse)
                 valid_losses.append(valid_rmse)
@@ -2224,6 +2568,74 @@ if __name__ == '__main__':
                                     
         np.save("y_test_t.npy",y_test_t)
         np.save("y_oof_t.npy", y_pred_t)
+
+        with timer('takuoko feature info for NN'):
+            use_cols = [c for c in use_colsnn if c in train.columns]
+
+            dense_cols = [c for c in X_train.columns if "dense" in c and "svd" not in c and "nmf" not in c]
+            inception_cols = [c for c in X_train.columns if "inception" in c and "svd" not in c and "nmf" not in c]
+            numerical = [c for c in use_cols if c not in categorical_features and c not in inception_cols + dense_cols]
+            important_numerical = [c for c in numerical if c in use_cols[:n_important]]
+            numerical = [c for c in numerical if c not in use_cols[:n_important]]
+            important_categorical = [c for c in categorical_features if c in use_cols[:n_important]]
+            categorical_features = [c for c in categorical_features if c not in use_cols[:n_important]]
+
+            train_cp = train[img_cols+numerical+important_numerical+categorical_features+important_categorical].copy()
+            for c in categorical_features + important_categorical:
+                train_cp[c] = LabelEncoder().fit_transform(train_cp[c])
+            train_cp.replace(np.inf, np.nan, inplace=True)
+            train_cp.replace(-np.inf, np.nan, inplace=True)
+            train_cp[important_numerical + numerical] = StandardScaler().fit_transform(
+                train_cp[important_numerical + numerical].rank())
+            train_cp.fillna(0, inplace=True)
+
+            X_test = train_cp.iloc[len_train:]
+            X_train = train_cp.iloc[:len_train]
+            X_desc_test = X_desc[len_train:]
+            X_desc_train = X_desc[:len_train]
+            del X_desc; gc.collect()
+
+        with timer('takuoko NN modeling'):
+            y_pred_t_nn = np.empty(len_train, )
+            y_test_t_nn = []
+            train_losses, valid_losses = [], []
+            x_test = get_keras_data(X_test, X_desc_test)
+
+            cv = StratifiedGroupKFold(n_splits=n_splits)
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
+                x_train = get_keras_data(X_train.iloc[train_index], X_desc_train[train_index])
+                x_valid = get_keras_data(X_train.iloc[valid_index], X_desc_train[valid_index])
+                y_train, y_valid = y[train_index], y[valid_index]
+
+                model = get_model(max_len, embedding_dim)
+                clr_tri = CyclicLR(base_lr=1e-5, max_lr=1e-2, step_size=len(X_train) // batch_size_nn, mode="triangular2")
+                ckpt = ModelCheckpoint('model.hdf5', save_best_only=True,
+                                       monitor='val_loss', mode='min')
+                history = model.fit(x_train, y_train, batch_size=batch_size_nn, validation_data=(x_valid, y_valid),
+                                    epochs=20, callbacks=[ckpt, clr_tri], verbose=2)
+                model.load_weights('model.hdf5')
+
+                y_pred_train = model.predict(x_train, batch_size=1000).reshape(-1, )
+                train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+
+                y_pred_valid = model.predict(x_valid, batch_size=1000).reshape(-1, )
+                valid_rmse = np.sqrt(mean_squared_error(y_valid, y_pred_valid))
+                y_pred_valid = rankdata(y_pred_valid) / len(y_pred_valid)
+                y_pred_t_nn[valid_index] = y_pred_valid
+
+                pred_test = model.predict(x_test, batch_size=1000).reshape(-1, )
+                pred_test = rankdata(pred_test) / len(pred_test)
+                y_test_t_nn.append(pred_test)
+
+                train_losses.append(train_rmse)
+                valid_losses.append(valid_rmse)
+
+            y_test_t_nn = np.mean(y_test_t_nn, axis=0)
+            logger.info(f'train RMSE = {np.mean(train_losses)}')
+            logger.info(f'valid RMSE = {np.mean(valid_losses)}')
+
+        np.save("y_test_t_nn.npy", y_test_t_nn)
+        np.save("y_oof_t_nn.npy", y_pred_t_nn)
     
     if K_flag:
         with timer('kaeru feature info'):
@@ -2238,68 +2650,6 @@ if __name__ == '__main__':
             y = y[:len_train]
             X.to_feather("X_train_k.feather")
             X_test.reset_index(drop=True).to_feather("X_test_k.feather")
-
-        with timer('kaeru classification features'):
-
-            cls_params = {
-                'objective': 'binary:logistic',
-                'eval_metric': 'auc',
-                'seed': 1337,
-                'eta': 0.0123,
-                'subsample': 0.8,
-                'colsample_bytree': 0.85,
-                'tree_method': 'gpu_hist',
-                'device': 'gpu',
-                'silent': 1,
-                'num_boost_round': 5000,
-                'early_stopping_rounds': 500,
-                'verbose_eval': 100
-            }
-
-            # beta-gaki for now
-            # classify AdoptionSpeed
-            cls_feat_generator = classification_feature()
-            n_split = 5
-
-            target_speed = 4
-            cls_feat_train_4, cls_feat_test_4 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 3
-            cls_feat_train_3, cls_feat_test_3 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 2
-            cls_feat_train_2, cls_feat_test_2 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 1
-            cls_feat_train_1, cls_feat_test_1 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 0
-            cls_feat_train_0, cls_feat_test_0 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-
-            X['speed4_flag'] = cls_feat_train_4
-            X_test['speed4_flag'] = cls_feat_test_4
-            predictors.append('speed4_flag')
-
-            X['speed3_flag'] = cls_feat_train_3
-            X_test['speed3_flag'] = cls_feat_test_3
-            predictors.append('speed3_flag')
-
-            X['speed2_flag'] = cls_feat_train_2
-            X_test['speed2_flag'] = cls_feat_test_2
-            predictors.append('speed2_flag')
-
-            X['speed1_flag'] = cls_feat_train_1
-            X_test['speed1_flag'] = cls_feat_test_1
-            predictors.append('speed1_flag')
-
-            X['speed0_flag'] = cls_feat_train_0
-            X_test['speed0_flag'] = cls_feat_test_0
-            predictors.append('speed0_flag')
-
-            X = train.loc[:, predictors]
-            X_test = X[len_train:]
-            X = X[:len_train]
 
         with timer('kaeru modeling'):
             y_pred_k = np.empty(len_train,)
@@ -2367,72 +2717,9 @@ if __name__ == '__main__':
 
             train_preds = lgb_adv.predict(X_adv.iloc[train_idx])
             extract_idx = np.argsort(-train_preds)[:int(len(train_idx)*0.85)]
+            np.save('extract_idx.npy', extract_idx)
             
             del X_adv_tr, X_adv_tst, y_adv_tr, y_adv_tst, X_adv, y_adv, lgb_adv; gc.collect()
-
-        with timer('gege classification features'):
-            X = X.iloc[extract_idx].reset_index(drop=True)
-            y = y[extract_idx].reset_index(drop=True)
-
-            cls_params = {
-                'objective': 'binary:logistic',
-                'eval_metric': 'auc',
-                'seed': 1337,
-                'eta': 0.0123,
-                'subsample': 0.8,
-                'colsample_bytree': 0.85,
-                'tree_method': 'gpu_hist',
-                'device': 'gpu',
-                'silent': 1,
-                'num_boost_round': 5000,
-                'early_stopping_rounds': 500,
-                'verbose_eval': 100
-            }
-
-            # beta-gaki for now
-            # classify AdoptionSpeed
-            cls_feat_generator = classification_feature()
-            n_split = 5
-
-            target_speed = 4
-            cls_feat_train_4, cls_feat_test_4 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 3
-            cls_feat_train_3, cls_feat_test_3 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 2
-            cls_feat_train_2, cls_feat_test_2 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 1
-            cls_feat_train_1, cls_feat_test_1 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-            target_speed = 0
-            cls_feat_train_0, cls_feat_test_0 = cls_feat_generator.calc_feature(X, y, X_test, target_speed, n_split,
-                                                                                cls_params)
-
-            X['speed4_flag'] = cls_feat_train_4
-            X_test['speed4_flag'] = cls_feat_test_4
-            predictors.append('speed4_flag')
-
-            X['speed3_flag'] = cls_feat_train_3
-            X_test['speed3_flag'] = cls_feat_test_3
-            predictors.append('speed3_flag')
-
-            X['speed2_flag'] = cls_feat_train_2
-            X_test['speed2_flag'] = cls_feat_test_2
-            predictors.append('speed2_flag')
-
-            X['speed1_flag'] = cls_feat_train_1
-            X_test['speed1_flag'] = cls_feat_test_1
-            predictors.append('speed1_flag')
-
-            X['speed0_flag'] = cls_feat_train_0
-            X_test['speed0_flag'] = cls_feat_test_0
-            predictors.append('speed0_flag')
-
-            X = train.loc[:, predictors]
-            X_test = X[len_train:]
-            X = X[:len_train]
 
         with timer('gege modeling'):
             X = X.iloc[extract_idx].reset_index(drop=True)
@@ -2466,8 +2753,38 @@ if __name__ == '__main__':
         np.save("extract_idx.npy", extract_idx)
     
     if T_flag and K_flag and G_flag:
-        y_pred = (y_pred_t[extract_idx] + y_pred_k[extract_idx] + y_pred_g) / 3
-        y_test = (y_test_t + y_test_k + y_test_g) / 3
+        with timer('stacking'):
+            X = np.concatenate([y_pred_t[extract_idx].reshape(-1, 1), 
+                                y_pred_t_nn[extract_idx].reshape(-1, 1), 
+                                y_pred_k[extract_idx].reshape(-1, 1), 
+                                y_pred_g.reshape(-1, 1), 
+                                ], axis=1)
+            X_test = np.concatenate([y_test_t.reshape(-1, 1), 
+                                     y_test_t_nn.reshape(-1, 1), 
+                                     y_test_k.reshape(-1, 1), 
+                                     y_test_g.reshape(-1, 1),
+                                    ], axis=1)
+
+            y_pred_stack_ridge = np.empty([len(extract_idx), 1])
+            y_test_stack_ridge = []
+            cv = StratifiedGroupKFold(n_splits=n_splits)
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)): 
+                X_train = X[train_index]
+                X_valid = X[valid_index]
+                y_train = y[train_index]
+                y_valid = y[valid_index]
+            
+                model = Ridge(alpha=0.01)
+                model.fit(X_train, y_train)
+                y_pred_valid = model.predict(X_valid)
+                y_pred_test = model.predict(X_test)
+            
+                y_test_stack_ridge.append(y_pred_test)
+                y_pred_stack_ridge[valid_index] = y_pred_valid.reshape(-1, 1)
+            
+            y_test = np.mean(y_test_stack_ridge, axis=0)
+            y_test = rankdata(y_test) / len(y_test)
+            y_pred = rankdata(y_pred_stack_ridge) / len(y_pred_stack_ridge)
     elif T_flag and K_flag:
         y_pred = y_pred_t*0.5 + y_pred_k*0.5
         y_test = y_test_t*0.5 + y_test_k*0.5
@@ -2498,6 +2815,8 @@ if __name__ == '__main__':
         y_test = optR.predict(y_test, coefficients).astype(int)
         
     with timer('postprocess'):
-        submission_with_postprocess(y_test)
-    # submission(y_test)
+        try:
+            submission_with_postprocessV3(y_test)
+        except:
+            submission(y_test)
     
