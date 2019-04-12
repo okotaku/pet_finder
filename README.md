@@ -8,6 +8,9 @@ https://www.kaggle.com/adityaecdrid/8th-place-solution-code
 binning, log scale
 https://www.kaggle.com/bminixhofer/6th-place-solution-code
 
+langdetect
+https://www.kaggle.com/corochann/13-th-place-solution-ensemble-of-5-models
+
 その他
 interaction->画像枚数+動画数とか
 犬猫の寿命feature, no nameのcleaning
