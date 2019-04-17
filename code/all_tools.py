@@ -1,10 +1,7 @@
 # -*- coding: utf-8 -*-
 '''
-- fixed n_batches, see: https://www.kaggle.com/c/petfinder-adoption-prediction/discussion/86684
-- updated meta_perser
 - reordered process 
-- changed dtypes
-- add stacking
+- replace num_images with PhotoAmt
 '''
 import itertools
 import json
@@ -34,8 +31,8 @@ from scipy.stats import rankdata
 from PIL import Image
 from multiprocessing import Pool
 from pymagnitude import Magnitude
-from gensim.models import word2vec, KeyedVectors
 from gensim.models.fasttext import FastText
+from gensim.models import word2vec, KeyedVectors
 from gensim.models.doc2vec import Doc2Vec, TaggedDocument
 from contextlib import contextmanager
 from itertools import combinations
@@ -45,15 +42,17 @@ from keras.applications.densenet import preprocess_input as preprocess_input_den
 from keras.applications.densenet import DenseNet121
 from keras.applications.inception_resnet_v2 import preprocess_input as preprocess_input_incep
 from keras.applications.inception_resnet_v2 import InceptionResNetV2
+from keras.applications.nasnet import preprocess_input as preprocess_input_nas
+from keras.applications.nasnet import NASNetMobile
 from keras.layers import GlobalAveragePooling2D, Input, Lambda, AveragePooling1D
+from keras.engine.topology import Layer
+from keras import initializers, regularizers, constraints
 from keras.models import Model
 from keras.preprocessing.text import text_to_word_sequence
 from keras.callbacks import *
 from keras.preprocessing.text import Tokenizer
 from keras.preprocessing.sequence import pad_sequences
-from keras.engine.topology import Layer
-from keras import initializers, regularizers, constraints
-from keras.layers import Dense, Input, CuDNNLSTM, Embedding, Dropout, CuDNNGRU, Conv1D
+from keras.layers import Dense, Input, CuDNNLSTM, Embedding, Dropout, CuDNNGRU, Conv1D, Subtract, Dot
 from keras.layers import Bidirectional, GlobalMaxPooling1D, concatenate, BatchNormalization, PReLU
 from keras.layers import Reshape, Flatten, Concatenate, SpatialDropout1D, GlobalAveragePooling1D, Multiply
 from sklearn.decomposition import LatentDirichletAllocation, TruncatedSVD, NMF
@@ -101,6 +100,7 @@ n_components_gege_txt = 16
 img_size = 256
 batch_size = 256
 batch_size_nn = 128
+epochs = 10
 
 # feature engineering NN
 max_len=128
@@ -1250,7 +1250,7 @@ def resize_to_square(im):
 def load_image(path):
     image = cv2.imread(path)
     new_image = resize_to_square(image)
-    return preprocess_input_dense(new_image), preprocess_input_incep(new_image)
+    return preprocess_input_dense(new_image), preprocess_input_incep(new_image), preprocess_input_nas(new_image)
 
 def get_age_feats(df):
     df["Age_year"] = (df["Age"] / 12).astype(np.int32)
@@ -1273,8 +1273,28 @@ def getSize(filename):
 
 def getDimensions(filename):
     img_size = Image.open(filename).size
-    return img_size 
-    
+    return img_size
+
+
+def run_linear_model(X, y, X_test, rescuer_id):
+    y_pred = np.empty(len_train, )
+    y_test = []
+
+    cv = GroupKFold(n_splits=n_splits)
+    for fold_id, (train_index, valid_index) in enumerate(cv.split(range(X.shape[0]), y=None, groups=rescuer_id)):
+        X_train = X[train_index]
+        X_valid = X[valid_index]
+        y_train = y[train_index]
+        y_valid = y[valid_index]
+
+        model = Ridge().fit(X_train, y_train)
+        pred_valid = model.predict(X_valid)
+        pred_test = model.predict(X_test)
+        y_test.append(pred_test)
+        y_pred[valid_index] = pred_valid
+
+    return np.hstack([y_pred, np.mean(y_test, axis=0)])
+
 # ===============
 # Model
 # ===============
@@ -1624,17 +1644,16 @@ def libfm_block(categorical_inputs, categorical_features, embedding_size=8):
     c = Concatenate()(biases + dots)
     return c
 
-
 def get_embed(x, maxvalue, embedding_size):
     embed = Embedding(maxvalue, embedding_size, input_length=1)(x)
     embed = Flatten()(embed)
     return embed
 
 
-def get_model(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.5, weight_decay=0.1):
+def get_model(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.4, weight_decay=0.1):
     inp_cats = []
     embs = []
-    for c in categorical_features:
+    for c in categorical_features_1000:
         inp_cat = Input(shape=[1], name=c)
         inp_cats.append(inp_cat)
         embs.append((Embedding(X_train[c].max() + 1, emb_n)(inp_cat)))
@@ -1648,11 +1667,65 @@ def get_model(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.5, weight_dec
     cats = PReLU()(cats)
     cats = Dropout(dout / 2)(cats)
 
-    #fms = libfm_block(inp_cats, categorical_features+important_categorical, embedding_size=8)
-    #fms = Dense(8, activation="linear")(fms)
-    #fms = BatchNormalization()(fms)
-    #fms = PReLU()(fms)
-    #fms = Dropout(dout / 2)(fms)
+    inp_numerical = Input(shape=(len(numerical_1000),), name="numerical")
+    inp_important_numerical = Input(shape=(len(important_numerical),), name="important_numerical")
+    nums = concatenate([inp_numerical, inp_important_numerical])
+    nums = Dense(32, activation="linear")(nums)
+    nums = BatchNormalization()(nums)
+    nums = PReLU()(nums)
+    nums = Dropout(dout)(nums)
+
+    inp_img = Input(shape=(len(img_cols),), name="img")
+    x_img = Dense(32, activation="linear")(inp_img)
+    x_img = BatchNormalization()(x_img)
+    x_img = PReLU()(x_img)
+    x_img = Dropout(dout)(x_img)
+
+    inp_desc = Input(shape=(max_len,), name="description")
+    emb_desc = Embedding(len(embedding_matrix), embedding_dim, weights=[embedding_matrix], trainable=False)(inp_desc)
+    emb_desc = SpatialDropout1D(0.2)(emb_desc)
+    x1 = Bidirectional(CuDNNLSTM(64, return_sequences=True))(emb_desc)
+    x2 = Bidirectional(CuDNNGRU(64, return_sequences=True))(x1)
+
+    max_pool2 = GlobalMaxPooling1D()(x2)
+    avg_pool2 = GlobalAveragePooling1D()(x2)
+    conc = Concatenate()([max_pool2, avg_pool2])
+    conc = BatchNormalization()(conc)
+
+    conc = Dense(32, activation="linear")(conc)
+    conc = BatchNormalization()(conc)
+    conc = PReLU()(conc)
+    conc = Dropout(dout)(conc)
+
+    fms = libfm_block(inp_cats_important, important_categorical, embedding_size=8)
+
+    x = concatenate([conc, x_img, nums, cats, inp_important_numerical, fms])
+    x = Dropout(dout / 2)(x)
+
+    out = Dense(1, activation="linear")(x)
+
+    model = Model(inputs=inp_cats + [inp_numerical, inp_important_numerical, inp_img, inp_desc], outputs=out)
+    model.compile(optimizer="adam", loss=rmse)
+    return model
+
+
+def get_model_selftrain(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.5, weight_decay=0.1):
+    inp_cats = []
+    embs = []
+    for c in categorical_features:
+        inp_cat = Input(shape=[1], name=c)
+        inp_cats.append(inp_cat)
+        embs.append((Embedding(X_train[c].max() + 1, emb_n)(inp_cat)))
+    for c in important_categorical:
+        inp_cat = Input(shape=[1], name=c)
+        inp_cats.append(inp_cat)
+        embs.append((Embedding(X_train[c].max() + 1, emb_n_imp)(inp_cat)))
+    cats = Flatten()(concatenate(embs))
+    imp_cats = Flatten()(concatenate(embs))
+    cats = Dense(8, activation="linear")(cats)
+    cats = BatchNormalization()(cats)
+    cats = PReLU()(cats)
+    cats = Dropout(dout / 2)(cats)
 
     inp_numerical = Input(shape=(len(numerical),), name="numerical")
     inp_important_numerical = Input(shape=(len(important_numerical),), name="important_numerical")
@@ -1679,13 +1752,18 @@ def get_model(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.5, weight_dec
     x_img = Dropout(dout)(x_img)
 
     inp_desc = Input(shape=(max_len,), name="description")
-    emb_desc = Embedding(len(embedding_matrix), embedding_dim, weights=[embedding_matrix], trainable=False)(inp_desc)
+    emb_desc = Embedding(len(embedding_matrix_self), embedding_dim, weights=[embedding_matrix_self],
+                         trainable=False)(inp_desc)
     emb_desc = SpatialDropout1D(0.2)(emb_desc)
     x1 = Bidirectional(CuDNNLSTM(32, return_sequences=True))(emb_desc)
     x2 = Bidirectional(CuDNNGRU(32, return_sequences=True))(x1)
 
+    max_pool2 = GlobalMaxPooling1D()(x2)
+    avg_pool2 = GlobalAveragePooling1D()(x2)
     att2 = Attention(max_len)(x2)
-    conc = BatchNormalization()(att2)
+    conc = Concatenate()([max_pool2, avg_pool2, att2])
+    conc = se_block(conc, 64 + 64 + 64)
+    conc = BatchNormalization()(conc)
 
     conc = Dense(32, activation="linear")(conc)
     conc = BatchNormalization()(conc)
@@ -1708,6 +1786,17 @@ def get_model(max_len, embedding_dim, emb_n=4, emb_n_imp=16, dout=.5, weight_dec
     return model
 
 def get_keras_data(df, description_embeds):
+    X = {
+        "numerical": df[numerical_1000].values,
+        "important_numerical": df[important_numerical].values,
+        "description": description_embeds,
+        "img": df[img_cols]
+    }
+    for c in categorical_features_1000 + important_categorical:
+        X[c] = df[c]
+    return X
+
+def get_keras_data_selftrain(df, description_embeds):
     X = {
         "numerical": df[numerical].values,
         "important_numerical": df[important_numerical].values,
@@ -1732,7 +1821,6 @@ def w2v_fornn(train_text, model, max_len):
     embedding_dim = model.dim
     embedding_matrix = np.zeros((len(word_index) + 1, embedding_dim))
 
-    result = []
     for word, i in word_index.items():
         if word in model:  # 0.9906
             embedding_matrix[i] = model.query(word)
@@ -1761,45 +1849,6 @@ def w2v_fornn(train_text, model, max_len):
 
     return train_text, embedding_matrix, embedding_dim, word_index
 
-
-def fasttext_fornn(train_text, model, max_len):
-    tokenizer = Tokenizer()
-    tokenizer.fit_on_texts(list(train_text))
-    train_text = tokenizer.texts_to_sequences(train_text)
-    train_text = pad_sequences(train_text, maxlen=max_len)
-    word_index = tokenizer.word_index
-
-    embedding_dim = model.vector_size
-    embedding_matrix = np.zeros((len(word_index) + 1, embedding_dim))
-
-    result = []
-    for word, i in word_index.items():
-        if word in model:  # 0.9906
-            embedding_matrix[i] = model.wv[word]
-            continue
-        word_ = word.upper()
-        if word_ in model:  # 0.9909
-            embedding_matrix[i] = model.wv[word_]
-            continue
-        word_ = word.capitalize()
-        if word_ in model:  # 0.9925
-            embedding_matrix[i] = model.wv[word_]
-            continue
-        word_ = ps.stem(word)
-        if word_ in model:  # 0.9927
-            embedding_matrix[i] = model.wv[word_]
-            continue
-        word_ = lc.stem(word)
-        if word_ in model:  # 0.9932
-            embedding_matrix[i] = model.wv[word_]
-            continue
-        word_ = sb.stem(word)
-        if word_ in model:  # 0.9933
-            embedding_matrix[i] = model.wv[word_]
-            continue
-        embedding_matrix[i] = np.zeros(embedding_dim)
-
-    return train_text, embedding_matrix, embedding_dim, word_index
 
 
 def self_train_w2v_tonn(train_text, max_len, w2v_params, mode="w2v"):
@@ -1846,6 +1895,7 @@ def self_train_w2v_tonn(train_text, max_len, w2v_params, mode="w2v"):
 
     return train_text, embedding_matrix, embedding_dim, word_index
 
+
 if __name__ == '__main__':
     init_logger()
     seed_everything(seed=seed)
@@ -1868,7 +1918,7 @@ if __name__ == '__main__':
     train.rename(columns={"fix_Breed1": "Breed1", "fix_Breed2": "Breed2"})
     logger.info(f'DataFrame shape: {train.shape}')
     
-    with timer('common features'): 
+    with timer('common features1'): 
         with timer('merge additional state files'):
             train = merge_state_info(train)
             
@@ -1887,6 +1937,144 @@ if __name__ == '__main__':
         with timer('preprocess category features'): 
             train = to_category(train, cat=categorical_features)
             
+    if G_flag:
+        with timer('gege features'): 
+            orig_cols = train.columns
+
+            with timer('frequency encoding'):
+                freq_cols = ['RescuerID', 'Breed1', 'Breed2', 'Color1', 'Color2', 'Color3', 'State']
+                train = freq_encoding(train, freq_cols)
+
+            g_cols += [c for c in train.columns if c not in orig_cols]
+            
+    if K_flag:
+        with timer('kaeru features'): 
+            orig_cols = train.columns
+
+            with timer('frequency encoding'):
+                freq_cols = ['BreedName_main_breed', 'BreedName_second_breed']
+                train = freq_encoding(train, freq_cols)
+
+            k_cols += [c for c in train.columns if c not in orig_cols if c not in kaeru_drop_cols]
+            
+    if T_flag:
+        with timer('takuoko features'): 
+            orig_cols = train.columns
+
+            with timer('aggregation'):
+                stats = ['mean', 'sum', 'median', 'min', 'max', 'var']
+                groupby_dict = [
+                    {
+                        'key': ['Name'], 
+                        'var': ['Age'], 
+                        'agg': ['count']
+                    },
+                    {
+                        'key': ['RescuerID'], 
+                        'var': ['Age'], 
+                        'agg': ['count']
+                    },
+                    {
+                        'key': ['RescuerID', 'State'], 
+                        'var': ['Age'], 
+                        'agg': ['count']
+                    },
+                    {
+                        'key': ['RescuerID', 'Type'], 
+                        'var': ['Age'], 
+                        'agg': ['count']
+                    },
+                    {
+                        'key': ['RescuerID'], 
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'agg': stats
+                    },
+                    {
+                        'key': ['RescuerID', 'State'], 
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'agg': stats
+                    },
+                    {
+                        'key': ['RescuerID', 'Type'], 
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'agg': stats
+                    },
+                    {
+                        'key': ['Type', 'Breed1', 'Breed2'], 
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'agg': stats
+                    },
+                    {
+                        'key': ['Type', 'Breed1'], 
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'agg': stats
+                    },
+                    {
+                        'key': ['State'], 
+                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
+                        'agg': stats
+                    },
+                    {
+                        'key': ['MaturitySize'], 
+                        'var': ['Age', 'Quantity', 'Sterilized', 'Fee'], 
+                        'agg': stats
+                    },
+                ]
+
+                nunique_dict = [
+                    {
+                        'key': ['State'], 
+                        'var': ['RescuerID'], 
+                        'agg': ['nunique']
+                    },
+                    {
+                        'key': ['Dewormed'], 
+                        'var': ['RescuerID'], 
+                        'agg': ['nunique']
+                    },
+                    {
+                        'key': ['Type'], 
+                        'var': ['RescuerID'], 
+                        'agg': ['nunique']
+                    },
+                    {
+                        'key': ['Type', 'Breed1'], 
+                        'var': ['RescuerID'], 
+                        'agg': ['nunique']
+                    },
+                ]
+
+                groupby = GroupbyTransformer(param_dict=nunique_dict)
+                train = groupby.transform(train)
+                groupby = GroupbyTransformer(param_dict=groupby_dict)
+                train = groupby.transform(train)
+                diff = DiffGroupbyTransformer(param_dict=groupby_dict)
+                train = diff.transform(train)
+                ratio = RatioGroupbyTransformer(param_dict=groupby_dict)
+                train = ratio.transform(train)
+
+            with timer('category embedding'):
+                train[['BreedName_main_breed', 'BreedName_second_breed']] = \
+                    train[['BreedName_main_breed', 'BreedName_second_breed']].astype("int32")
+                for c in categorical_features:
+                    train[c] = train[c].fillna(train[c].max() + 1)
+
+                cv = CategoryVectorizer(categorical_features, n_components, 
+                         vectorizer=CountVectorizer(), 
+                         transformer=LatentDirichletAllocation(n_components=n_components, n_jobs=-1, learning_method='online', random_state=777),
+                         name='CountLDA')
+                features1 = cv.transform(train).astype(np.float32)
+
+                cv = CategoryVectorizer(categorical_features, n_components, 
+                         vectorizer=CountVectorizer(), 
+                         transformer=TruncatedSVD(n_components=n_components, random_state=777),
+                         name='CountSVD')
+                features2 = cv.transform(train).astype(np.float32)
+                train = pd.concat([train, features1, features2], axis=1)
+
+            t_cols += [c for c in train.columns if c not in orig_cols]
+            
+    with timer('common features2'):      
         train[text_features].fillna('missing', inplace=True)
         with timer('preprocess metadata'): #使ってるcolsがkaeruさんとtakuokoで違う kaeruさんがfirst系は全部使うが、takuokoは使わない
             meta_parser = MetaDataParser(n_jobs=cpu_count)
@@ -1925,11 +2113,11 @@ if __name__ == '__main__':
             del meta_features_all, meta_features_pick, meta_features, sentiment_features; gc.collect()
             
         with timer('make image features'):
-                train_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/train_images/*.jpg'))
-                test_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/test_images/*.jpg'))
-                image_files = train_image_files + test_image_files
-                train_images = pd.DataFrame(image_files, columns=['image_filename'])
-                train_images['PetID'] = train_images['image_filename'].apply(lambda x: x.split('/')[-1].split('-')[0])
+            train_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/train_images/*.jpg'))
+            test_image_files = sorted(glob.glob('../input/petfinder-adoption-prediction/test_images/*.jpg'))
+            image_files = train_image_files + test_image_files
+            train_images = pd.DataFrame(image_files, columns=['image_filename'])
+            train_images['PetID'] = train_images['image_filename'].apply(lambda x: x.split('/')[-1].split('-')[0])
         
     if T_flag:
         with timer('takuoko features'): 
@@ -2085,6 +2273,16 @@ if __name__ == '__main__':
                 X_desc, embedding_matrix, embedding_dim, word_index = w2v_fornn(train["Description_Emb"], model,
                                                                                 max_len)
                 del model; gc.collect()
+
+            with timer('description selftrain for NN'):
+                w2v_params = {
+                    "size": 300,
+                    "seed": 0,
+                    "min_count": 1,
+                    "workers": 1
+                }
+                X_desc_self, embedding_matrix_self, embedding_dim_self, word_index_self = self_train_w2v_tonn(
+                                                                     train["Description_bow"],  max_len, w2v_params)
                 
             with timer('meta text bow/tfidf->svd / nmf / bm25'): 
                 train['desc'] = ''
@@ -2129,121 +2327,38 @@ if __name__ == '__main__':
                                 + ['meta_desc_count_bm25_{}'.format(i) for i in range(n_components)])
                 train = pd.concat([train, X], axis=1)
                 train.drop(['desc'], axis=1, inplace=True)
+
+            with timer('tfidf + ridge'):
+                vectorizer = make_pipeline(
+                    TfidfVectorizer(),
+                )
+                X = vectorizer.fit_transform(train['Description'])
+                y = train[target].values
+                rescuer_id = train.loc[:, 'RescuerID'].iloc[:len_train]
+                pred = run_linear_model(X[:len_train], y[:len_train],
+                                        X[len_train:], rescuer_id)
+                X = pd.DataFrame(pred, columns=['tfidf_ridge'])
+                train = pd.concat([train, X], axis=1)
+                del vectorizer;
+                gc.collect()
+
+            with timer('count + ridge'):
+                vectorizer = make_pipeline(
+                    CountVectorizer(),
+                )
+                X = vectorizer.fit_transform(train['Description'])
+                y = train[target].values
+                rescuer_id = train.loc[:, 'RescuerID'].iloc[:len_train]
+                pred = run_linear_model(X[:len_train], y[:len_train],
+                                        X[len_train:], rescuer_id)
+                X = pd.DataFrame(pred, columns=['count_ridge'])
+                train = pd.concat([train, X], axis=1)
+                del vectorizer;
+                gc.collect()
                 
             with timer('image features'): 
-                train['num_images'] = train['PetID'].apply(lambda x: sum(train_images.PetID == x))
+                train['num_images'] = train['PhotoAmt']
                 train['num_images_per_pet'] = train['num_images'] / train['Quantity']
-
-            with timer('aggregation'):
-                stats = ['mean', 'sum', 'median', 'min', 'max', 'var']
-                groupby_dict = [
-                    {
-                        'key': ['Name'], 
-                        'var': ['Age'], 
-                        'agg': ['count']
-                    },
-                    {
-                        'key': ['RescuerID'], 
-                        'var': ['Age'], 
-                        'agg': ['count']
-                    },
-                    {
-                        'key': ['RescuerID', 'State'], 
-                        'var': ['Age'], 
-                        'agg': ['count']
-                    },
-                    {
-                        'key': ['RescuerID', 'Type'], 
-                        'var': ['Age'], 
-                        'agg': ['count']
-                    },
-                    {
-                        'key': ['RescuerID'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
-                        'agg': stats
-                    },
-                    {
-                        'key': ['RescuerID', 'State'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
-                        'agg': stats
-                    },
-                    {
-                        'key': ['RescuerID', 'Type'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
-                        'agg': stats
-                    },
-                    {
-                        'key': ['Type', 'Breed1', 'Breed2'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
-                        'agg': stats
-                    },
-                    {
-                        'key': ['Type', 'Breed1'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
-                        'agg': stats
-                    },
-                    {
-                        'key': ['State'], 
-                        'var': ['Age', 'Quantity', 'MaturitySize', 'Sterilized', 'Fee'], 
-                        'agg': stats
-                    },
-                    {
-                        'key': ['MaturitySize'], 
-                        'var': ['Age', 'Quantity', 'Sterilized', 'Fee'], 
-                        'agg': stats
-                    },
-                ]
-
-                nunique_dict = [
-                    {
-                        'key': ['State'], 
-                        'var': ['RescuerID'], 
-                        'agg': ['nunique']
-                    },
-                    {
-                        'key': ['Dewormed'], 
-                        'var': ['RescuerID'], 
-                        'agg': ['nunique']
-                    },
-                    {
-                        'key': ['Type'], 
-                        'var': ['RescuerID'], 
-                        'agg': ['nunique']
-                    },
-                    {
-                        'key': ['Type', 'Breed1'], 
-                        'var': ['RescuerID'], 
-                        'agg': ['nunique']
-                    },
-                ]
-
-                groupby = GroupbyTransformer(param_dict=nunique_dict)
-                train = groupby.transform(train)
-                groupby = GroupbyTransformer(param_dict=groupby_dict)
-                train = groupby.transform(train)
-                diff = DiffGroupbyTransformer(param_dict=groupby_dict)
-                train = diff.transform(train)
-                ratio = RatioGroupbyTransformer(param_dict=groupby_dict)
-                train = ratio.transform(train)
-
-            with timer('category embedding'):
-                train[['BreedName_main_breed', 'BreedName_second_breed']] = \
-                    train[['BreedName_main_breed', 'BreedName_second_breed']].astype("int32")
-                for c in categorical_features:
-                    train[c] = train[c].fillna(train[c].max() + 1)
-
-                cv = CategoryVectorizer(categorical_features, n_components, 
-                         vectorizer=CountVectorizer(), 
-                         transformer=LatentDirichletAllocation(n_components=n_components, n_jobs=-1, learning_method='online', random_state=777),
-                         name='CountLDA')
-                features1 = cv.transform(train).astype(np.float32)
-
-                cv = CategoryVectorizer(categorical_features, n_components, 
-                         vectorizer=CountVectorizer(), 
-                         transformer=TruncatedSVD(n_components=n_components, random_state=777),
-                         name='CountSVD')
-                features2 = cv.transform(train).astype(np.float32)
-                train = pd.concat([train, features1, features2], axis=1)
 
             t_cols += [c for c in train.columns if c not in orig_cols]
         
@@ -2259,10 +2374,6 @@ if __name__ == '__main__':
             orig_cols = train.columns
             with timer('enginerring age'): 
                 train = get_age_feats(train)
-
-            with timer('frequency encoding'):
-                freq_cols = ['BreedName_main_breed', 'BreedName_second_breed']
-                train = freq_encoding(train, freq_cols)
 
             with timer('tfidf + svd / nmf'):
                 vectorizer = make_pipeline(
@@ -2338,10 +2449,6 @@ if __name__ == '__main__':
     if G_flag:
         with timer('gege features'): 
             orig_cols = train.columns
-
-            with timer('frequency encoding'):
-                freq_cols = ['RescuerID', 'Breed1', 'Breed2', 'Color1', 'Color2', 'Color3', 'State']
-                train = freq_encoding(train, freq_cols)
 
             with timer('tfidf + svd'):
                 vectorizer = make_pipeline(
@@ -2445,8 +2552,19 @@ if __name__ == '__main__':
             out2 = Lambda(lambda x: x[:, :, 0])(x2)
             model_inception = Model(inp2, out2)
 
+            inp3 = Input((256, 256, 3))
+            backbone3 = NASNetMobile(input_tensor=inp3,
+                                     include_top=False,
+                                     pooling='avg',
+                                     weights=None)
+            x = Dropout(0.75)(backbone3.output)
+            x = Dense(10, activation='softmax')(x)
+            model_nasnet = Model(backbone3.input, x)
+            model_nasnet.load_weights('../input/copy-of-titu1994neuralimageassessment/nasnet_weights.h5')
+
             features_dense = []
             features_inception = []
+            features_nasnet = []
             for b in range(n_batches):
                 start = b * batch_size
                 end = (b + 1) * batch_size
@@ -2454,16 +2572,19 @@ if __name__ == '__main__':
                 batch_path = img_pathes[start: end]
                 batch_images_dense = np.zeros((len(batch_pets), img_size, img_size, 3))
                 batch_images_incep = np.zeros((len(batch_pets), img_size, img_size, 3))
+                batch_images_nas = np.zeros((len(batch_pets), img_size, img_size, 3))
                 for i, (pet_id, path) in enumerate(zip(batch_pets, batch_path)):
                     try:
-                        batch_images_dense[i], batch_images_incep[i] = load_image(path)
+                        batch_images_dense[i], batch_images_incep[i], batch_images_nas[i] = load_image(path)
                     except:
                         pass
                 batch_preds_dense = model_dense.predict(batch_images_dense)
                 batch_preds_inception = model_inception.predict(batch_images_incep)
+                batch_preds_nasnet = model_nasnet.predict(batch_images_nas)
                 for i, pet_id in enumerate(batch_pets):
                     features_dense.append([pet_id] + list(batch_preds_dense[i]))
                     features_inception.append([pet_id] + list(batch_preds_inception[i]))
+                    features_nasnet.append([pet_id] + list(batch_preds_nasnet[i]))
 
             X = pd.DataFrame(features_dense, columns=["PetID"] + ["dense121_2_{}".format(i) for i in
                                                                     range(batch_preds_dense.shape[1])])
@@ -2477,6 +2598,14 @@ if __name__ == '__main__':
 
             X = pd.DataFrame(features_inception, columns=["PetID"] + ["inception_resnet_{}".format(i) for i in
                                                                         range(batch_preds_inception.shape[1])])
+            gp_img = X.groupby("PetID").mean().reset_index()
+            train = pd.merge(train, gp_img, how="left", on="PetID")
+            t_cols += list(gp_img.columns.drop("PetID"))
+            del gp_img, X;
+            gc.collect()
+
+            X = pd.DataFrame(features_nasnet, columns=["PetID"] + ["features_nasnet{}".format(i) for i in
+                                                                   range(batch_preds_nasnet.shape[1])])
             gp_img = X.groupby("PetID").mean().reset_index()
             train = pd.merge(train, gp_img, how="left", on="PetID")
             t_cols += list(gp_img.columns.drop("PetID"))
@@ -2574,11 +2703,15 @@ if __name__ == '__main__':
 
             dense_cols = [c for c in X_train.columns if "dense" in c and "svd" not in c and "nmf" not in c]
             inception_cols = [c for c in X_train.columns if "inception" in c and "svd" not in c and "nmf" not in c]
-            numerical = [c for c in use_cols if c not in categorical_features and c not in inception_cols + dense_cols]
+            img_cols = dense_cols + inception_cols
+            numerical = [c for c in use_cols if c not in categorical_features and c not in img_cols]
             important_numerical = [c for c in numerical if c in use_cols[:n_important]]
             numerical = [c for c in numerical if c not in use_cols[:n_important]]
             important_categorical = [c for c in categorical_features if c in use_cols[:n_important]]
             categorical_features = [c for c in categorical_features if c not in use_cols[:n_important]]
+
+            numerical_1000 = [c for c in use_cols[n_important:1000] if c not in categorical_features and c not in img_cols]
+            categorical_features_1000 = [c for c in categorical_features if c not in use_cols[n_important:1000]]
 
             train_cp = train[img_cols+numerical+important_numerical+categorical_features+important_categorical].copy()
             for c in categorical_features + important_categorical:
@@ -2593,11 +2726,13 @@ if __name__ == '__main__':
             X_train = train_cp.iloc[:len_train]
             X_desc_test = X_desc[len_train:]
             X_desc_train = X_desc[:len_train]
-            del X_desc; gc.collect()
+            X_desc_self_test = X_desc_self[len_train:]
+            X_desc_self_train = X_desc_self[:len_train]
+            del X_desc, X_desc_self; gc.collect()
 
         with timer('takuoko NN modeling'):
-            y_pred_t_nn = np.empty(len_train, )
-            y_test_t_nn = []
+            y_pred_t_nn1 = np.empty(len_train, )
+            y_test_t_nn1 = []
             train_losses, valid_losses = [], []
             x_test = get_keras_data(X_test, X_desc_test)
 
@@ -2612,7 +2747,7 @@ if __name__ == '__main__':
                 ckpt = ModelCheckpoint('model.hdf5', save_best_only=True,
                                        monitor='val_loss', mode='min')
                 history = model.fit(x_train, y_train, batch_size=batch_size_nn, validation_data=(x_valid, y_valid),
-                                    epochs=20, callbacks=[ckpt, clr_tri], verbose=2)
+                                    epochs=epochs, callbacks=[ckpt, clr_tri], verbose=2)
                 model.load_weights('model.hdf5')
 
                 y_pred_train = model.predict(x_train, batch_size=1000).reshape(-1, )
@@ -2621,21 +2756,72 @@ if __name__ == '__main__':
                 y_pred_valid = model.predict(x_valid, batch_size=1000).reshape(-1, )
                 valid_rmse = np.sqrt(mean_squared_error(y_valid, y_pred_valid))
                 y_pred_valid = rankdata(y_pred_valid) / len(y_pred_valid)
-                y_pred_t_nn[valid_index] = y_pred_valid
+                y_pred_t_nn1[valid_index] = y_pred_valid
 
                 pred_test = model.predict(x_test, batch_size=1000).reshape(-1, )
                 pred_test = rankdata(pred_test) / len(pred_test)
-                y_test_t_nn.append(pred_test)
+                y_test_t_nn1.append(pred_test)
 
                 train_losses.append(train_rmse)
                 valid_losses.append(valid_rmse)
 
-            y_test_t_nn = np.mean(y_test_t_nn, axis=0)
+                del model;
+                K.clear_session()
+
+            y_test_t_nn1 = np.mean(y_test_t_nn1, axis=0)
             logger.info(f'train RMSE = {np.mean(train_losses)}')
             logger.info(f'valid RMSE = {np.mean(valid_losses)}')
 
-        np.save("y_test_t_nn.npy", y_test_t_nn)
-        np.save("y_oof_t_nn.npy", y_pred_t_nn)
+        np.save("y_test_t_nn1.npy", y_test_t_nn1)
+        np.save("y_oof_t_nn1.npy", y_pred_t_nn1)
+
+        with timer('takuoko selftrained NN modeling'):
+            y_pred_t_nn2 = np.empty(len_train, )
+            y_test_t_nn2 = []
+            train_losses, valid_losses = [], []
+            x_test = get_keras_data_selftrain(X_test, X_desc_self_test)
+
+            cv = StratifiedGroupKFold(n_splits=n_splits)
+            for fold_id, (train_index, valid_index) in enumerate(cv.split(range(len(X)), y=y, groups=rescuer_id)):
+                x_train = get_keras_data_selftrain(X_train.iloc[train_index], X_desc_self_train[train_index])
+                x_valid = get_keras_data_selftrain(X_train.iloc[valid_index], X_desc_self_train[valid_index])
+                y_train, y_valid = y[train_index], y[valid_index]
+
+                model = get_model_selftrain(max_len, embedding_dim_self)
+                clr_tri = CyclicLR(base_lr=1e-5, max_lr=1e-2, step_size=len(X_train) // batch_size_nn, mode="triangular2")
+                ckpt = ModelCheckpoint('model.hdf5', save_best_only=True,
+                                       monitor='val_loss', mode='min')
+                history = model.fit(x_train, y_train, batch_size=batch_size_nn, validation_data=(x_valid, y_valid),
+                                    epochs=epochs, callbacks=[ckpt, clr_tri], verbose=2)
+                model.load_weights('model.hdf5')
+
+                y_pred_train = model.predict(x_train, batch_size=1000).reshape(-1, )
+                train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+
+                y_pred_valid = model.predict(x_valid, batch_size=1000).reshape(-1, )
+                valid_rmse = np.sqrt(mean_squared_error(y_valid, y_pred_valid))
+                y_pred_valid = rankdata(y_pred_valid) / len(y_pred_valid)
+                y_pred_t_nn2[valid_index] = y_pred_valid
+
+                pred_test = model.predict(x_test, batch_size=1000).reshape(-1, )
+                pred_test = rankdata(pred_test) / len(pred_test)
+                y_test_t_nn2.append(pred_test)
+
+                train_losses.append(train_rmse)
+                valid_losses.append(valid_rmse)
+
+                del model;
+                K.clear_session()
+
+            y_test_t_nn2 = np.mean(y_test_t_nn2, axis=0)
+            logger.info(f'train RMSE = {np.mean(train_losses)}')
+            logger.info(f'valid RMSE = {np.mean(valid_losses)}')
+
+        np.save("y_test_t_nn2.npy", y_test_t_nn2)
+        np.save("y_oof_t_nn2.npy", y_pred_t_nn2)
+
+        y_test_t_nn = (y_test_t_nn1 + y_test_t_nn2) / 2
+        y_pred_t_nn = (y_pred_t_nn1 + y_pred_t_nn2) / 2
     
     if K_flag:
         with timer('kaeru feature info'):
