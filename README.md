@@ -17,3 +17,6 @@ https://nmaviv.hatenablog.com/entry/2019/04/10/233211?_ga=2.31256056.694164543.1
 その他
 interaction->画像枚数+動画数とか
 犬猫の寿命feature, no nameのcleaning
+
+## License
+MIT
